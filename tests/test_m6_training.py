@@ -155,13 +155,53 @@ class M6TrainingTests(unittest.TestCase):
         self.assertNotIn("--split", record["process_args"])
         self.assertFalse(record["config"]["amp"])
         self.assertNotIn("--amp", record["process_args"])
-        with self.assertRaises(TrainingError):
-            service.start_training(self.subset, self.weights, TrainingConfig(1, epochs=2))
+        repeated = service.start_training(self.subset, self.weights, TrainingConfig(1, epochs=2))
+        self.wait_for_completion(service)
+        self.assertNotEqual(repeated.run_id, first.run_id)
+        self.assertEqual(service.load_run(repeated.run_id)["config_fingerprint"], record["config_fingerprint"])
         second = service.start_training(self.subset, self.weights, TrainingConfig(2, epochs=3, seed=5, amp=True))
         self.wait_for_completion(service)
         self.assertEqual(service.load_run(second.run_id)["status"], "completed")
         self.assertTrue(service.load_run(second.run_id)["config"]["amp"])
         self.assertIn("--amp", service.load_run(second.run_id)["process_args"])
+
+    def test_more_than_four_completed_runs_keep_separate_records_and_results(self) -> None:
+        from ai_assessment.services.results import ResultsService
+
+        service = TrainingService(self.workspace, process_factory=self.factory)
+        run_ids: list[str] = []
+        for number in range(1, 7):
+            run = service.start_training(self.subset, self.weights, TrainingConfig(number, epochs=2))
+            self.wait_for_completion(service)
+            run_ids.append(run.run_id)
+            self.assertEqual(service.load_run(run.run_id)["status"], "completed")
+        self.assertEqual(len(set(run_ids)), 6)
+        self.assertEqual(len(service.list_runs()), 6)
+        self.assertEqual(len(ResultsService(self.workspace).completed_best_checkpoints()), 6)
+        self.assertEqual(service.load_run(run_ids[-1])["experiment_index"], 6)
+        with self.assertRaisesRegex(TrainingError, "positive integer"):
+            service.start_training(self.subset, self.weights, TrainingConfig(0))
+
+    def test_training_page_suggests_next_run_number(self) -> None:
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from ai_assessment.modules.training import TrainingPage
+
+        service = TrainingService(self.workspace, process_factory=self.factory)
+        for number in range(1, 6):
+            run = service.start_training(self.subset, self.weights, TrainingConfig(number, epochs=2))
+            self.wait_for_completion(service)
+            self.assertEqual(service.load_run(run.run_id)["status"], "completed")
+        app = QApplication.instance() or QApplication([])
+        page = TrainingPage(self.workspace)
+        try:
+            self.assertEqual(page.run_number.value(), 6)
+            self.assertEqual(page.runs_table.rowCount(), 5)
+        finally:
+            page.shutdown()
+            page.close()
+            del app
 
     def test_failed_process_retains_failed_record(self) -> None:
         def failed_factory(**kwargs) -> FakeProcess:

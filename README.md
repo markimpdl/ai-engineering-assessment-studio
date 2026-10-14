@@ -30,6 +30,26 @@ On a CPU-only PC, omit the CUDA PyTorch command. If CUDA verification fails, che
 
 If the repository is in a different folder, replace the `cd` path. The editable install makes the `ai_assessment` package available to the commands below.
 
+## macOS setup (practice use)
+
+Install a native macOS Conda distribution (Miniforge or Anaconda) for your Mac's architecture. From Terminal in this repository, run:
+
+```bash
+bash install_macos.sh
+```
+
+The script asks for an environment name (default `ai-assessment-studio`), creates or reuses a Python 3.12 Conda environment, installs the macOS PyTorch wheels and `.[gui]`, then checks that the application imports and that a CPU or MPS tensor can be created. If Conda is not found, initialize it with `conda init zsh` (or `conda init bash` for Bash), reopen Terminal, and rerun the script. Existing environments must use Python 3.12.
+
+After setup, open a new Terminal in the repository:
+
+```bash
+conda activate ai-assessment-studio
+python -m ai_assessment --headless-check --workspace candidate_workspaces/C014
+python -m ai_assessment --workspace candidate_workspaces/C014
+```
+
+On Apple Silicon, select `mps` in Training when the installer reports `device: mps`; otherwise select `cpu`. Intel Macs install the last available compatible PyTorch 2.2.2 / torchvision 0.17.2 wheels and train on CPU. macOS does not use the Windows CUDA PyTorch wheels. This is a developer/practice install; the official assessment workstation remains the Windows 11 baseline. A real Mac test of the camera, training, and simulator is still needed.
+
 ## Run the shell and tests
 
 Create or reopen the default `C014` workspace and launch the desktop shell. A new workspace takes its candidate ID from the folder name, so each student can use their own folder, for example `--workspace candidate_workspaces\aluno1`; the sidebar shows both the ID and the workspace folder. Pass `--candidate-id` only to override that name:
@@ -38,7 +58,15 @@ Create or reopen the default `C014` workspace and launch the desktop shell. A ne
 python -m ai_assessment --workspace candidate_workspaces\C014
 ```
 
-The candidate ID is only needed when creating a new workspace. When reopening an existing workspace, omit `--candidate-id` or provide the ID already stored in `session.json`. A different explicit ID is rejected.
+The sidebar shows the candidate ID saved in the active workspace's `session.json`. For a new candidate workspace, use its ID as the folder name; the app will assign that ID automatically:
+
+```bat
+python -m ai_assessment --workspace candidate_workspaces\C015
+```
+
+Alternatively, `python -m ai_assessment --candidate-id C015` creates or opens `candidate_workspaces/C015` when no workspace path is provided. From inside an existing candidate workspace, the app reopens that workspace. From the repository root, it automatically opens a single existing candidate workspace; when several exist, provide `--workspace` so the app does not guess. Without any existing workspace or candidate ID, the practice default remains `C014`.
+
+When reopening, the saved session ID must match a candidate-style folder name and any explicit `--candidate-id`. If an older run created `candidate_workspaces/C015/session.json` with `C014`, startup reports the mismatch instead of displaying the wrong identity. Preserve that workspace and its audit events; create a correctly identified workspace for new work rather than editing `session.json` by hand.
 
 Run the non-GUI workspace check:
 
@@ -89,15 +117,15 @@ python -m unittest discover -s tests -v
 
 ## M4 Vision Studio
 
-Open **Vision** in the sidebar. Start the camera before selecting a model for a live raw preview; camera capture, model loading, and inference run outside the Qt interface. Select an existing local `.pt` or supported `.onnx` file with **Browse model...**. The app never downloads weights or silently substitutes cached base weights for trained checkpoints.
+Open **Vision** in the sidebar. Choose **Camera** for a live preview, **Video file (loop)** for a local file, or **RTSP stream** for a live network source. For RTSP, paste an address such as `rtsp://127.0.0.1:8554/camera`; Vision selects the RTSP input when you finish editing, then click **Start stream**. The URL remains visible and editable even while an input is running. To use a changed URL, click **Stop**, then **Start stream**. Select **Hide RTSP URL** if you need to obscure it on screen. Vision reconnects if the server is unavailable or a stream drops; **Stop** ends retries. Local video playback repeats from the beginning and follows the video's frame rate (with a fallback for files without reliable FPS metadata). OpenCV handles video decoding, so usable formats and codecs depend on the installed OpenCV build. Video frames are processed locally, without copying the file into the candidate workspace; audio is not played. Capture, video decoding, network reads, model loading, and inference run outside the Qt interface. Select an existing local `.pt` or supported `.onnx` file with **Browse model...**. The app never downloads weights or silently substitutes cached base weights for trained checkpoints.
 
-When **Results** has a selected production model, Vision shows that run ID and the full `models/<run-id>/weights/best.pt` checkpoint path separately from the current camera-profile model. Use **Use selected Results model** to replace any older profile path and load the selected checkpoint with its recorded SHA-256. Vision also lists completed training runs from the current candidate workspace; choose a run and use **Use run best.pt** to load that run's trained checkpoint. Missing or changed recorded checkpoints are reported before loading. Cached base weights under `models/base_weights/` are not treated as trained checkpoints. The manual `.pt`/`.onnx` browse path remains available for local experiments.
+When **Results** has a selected production model, Vision shows that run ID and the full `models/<run-id>/weights/best.pt` checkpoint path separately from the current Vision profile model. Use **Use selected Results model** to replace any older profile path and load the selected checkpoint with its recorded SHA-256. Vision also lists completed training runs from the current candidate workspace; choose a run and use **Use run best.pt** to load that run's trained checkpoint. Missing or changed recorded checkpoints are reported before loading. Cached base weights under `models/base_weights/` are not treated as trained checkpoints. The manual `.pt`/`.onnx` browse path remains available for local experiments.
 
-Vision Studio shows the untouched full-frame camera image beside the corrected ROI sent to YOLO. Drag an ROI on the raw image, tune confidence, software brightness and contrast, and request exposure, focus, or white-balance values. The camera panel shows requested values and driver read-back values because camera drivers may ignore or quantize settings. The actual inference device is shown after model load.
+Vision Studio shows the untouched full-frame input image beside the corrected ROI sent to YOLO. Drag an ROI on the raw image and tune confidence, software brightness and contrast for all three inputs. For camera input, request exposure, focus, or white-balance values; the camera panel shows requested values and driver read-back values because camera drivers may ignore or quantize settings. In video and RTSP modes, camera index and camera properties are disabled, while brightness and contrast remain available. A camera calibration is never applied to a prerecorded video or RTSP input. RTSP reads use the OpenCV FFmpeg backend with connection/read timeouts; the Windows environment must include that backend and a codec supported by the stream. The actual inference device is shown after model load.
 
-Detection rows contain class ID/name, confidence, full-frame bounding box, full-frame center pixels, frame ID, and optional robot X/Y. A saved M2 calibration is used only when its full-frame geometry matches the current frame; a mismatch is shown as a warning. A class ID is never treated as a robot position. **Save snapshot** writes the raw frame, annotated processed image, and metadata under `candidate_workspaces\C014\exports\vision\`. The active camera profile is persisted at `candidate_workspaces\C014\camera\vision_profile.json`.
+Detection rows contain class ID/name, confidence, full-frame bounding box, full-frame center pixels, frame ID, and optional robot X/Y. For camera input, a saved M2 calibration is used only when its full-frame geometry matches the current frame; a mismatch is shown as a warning. A class ID is never treated as a robot position. **Save snapshot** writes the raw frame, annotated processed image, and metadata under `candidate_workspaces\C014\exports\vision\`. The chosen input, local video path, and adjustments are persisted at `candidate_workspaces\C014\camera\vision_profile.json`.
 
-Calibration and Vision share a camera ownership guard, so starting one module while the other has the webcam reports which module must be stopped first. Vision logs camera start/stop, model load, ROI changes, and snapshots without logging every frame.
+The RTSP URL is used only during the current session; it is never written to the Vision profile, snapshot metadata, or event log because it may include a username, password, or token. Paste the URL again after restarting the application. The Studio reads an RTSP publisher or server; it does not publish webcam video as an RTSP server. Calibration and Vision share a camera ownership guard, so starting one module while the other has the webcam reports which module must be stopped first. RTSP and local video do not acquire the webcam. Vision logs camera, video, or RTSP start/stop, model load, ROI changes, and snapshots without logging every frame.
 
 ## M5 Robot Studio
 
@@ -125,7 +153,7 @@ For the competition network, allow the official Ultralytics GitHub release downl
 
 Training **Device** is blank by default: Ultralytics chooses CUDA device 0 when PyTorch can access a GPU and CPU otherwise. Choose `cpu` explicitly for a CPU smoke test. **Enable AMP** is unchecked by default: FP32 training can still use CUDA, while Ultralytics' AMP capability check may try to download a second `yolo26n.pt` into its own weights directory. Enable AMP only when that check model is available and its optional download is permitted by the router. The AMP choice is saved with each experiment. The Windows installer sets up CUDA PyTorch first on detected NVIDIA machines; verify a full GPU training run on the official image before competition use. No model weights, dataset, workspace, or generated run output belongs in Git.
 
-Training allows four completed, distinct experiment configurations per workspace. Each run keeps its ID, slot, parameters, seed, manifest and base-weight hashes, environment/package versions, process arguments, timestamps, status, logs, metrics, and checkpoint hashes under `models/`, `results/training/`, and `logs/training/`. Failed and cancelled runs remain visible but do not occupy a completed experiment slot; they can be retried with the same configuration. Cancellation releases the Windows child process tree; a resumed run is not silently counted as a new experiment.
+Training allows additional local runs after the fourth. The **Run number** field defaults to one higher than the largest number already recorded, and can be changed to any positive integer. Repeating the same settings creates a new run ID and keeps both records for comparison. Each run keeps its ID, number, parameters, seed, manifest and base-weight hashes, environment/package versions, process arguments, timestamps, status, logs, metrics, and checkpoint hashes under `models/`, `results/training/`, and `logs/training/`. Failed and cancelled runs remain visible and can be retried. Only one training process can run at a time per workspace; cancellation releases the Windows child process tree. This local change does not revise the architecture's proposed four-experiment assessment scheme or establish official scoring rules.
 
 Use **Results** to compare candidate-visible mAP50, mAP50-95, precision, recall, available per-class metrics, loss-curve rows, confusion-matrix artifacts, and latency. Values that were not produced are shown as `unavailable`. Training saves each run under `candidate_workspaces/<candidate-id>/models/<run-id>/`: use `weights/best.pt` for the trained model, while `results.csv` and training plots stay in the same run folder. Candidate-visible validation plots may appear in the sibling `models/<run-id>_val/` folder. The app's metadata is stored separately in `candidate_workspaces/<candidate-id>/results/training/<run-id>/run.json`, with the console log at `logs/training/<run-id>.log`. In **Results**, select the completed run to see absolute paths, open the run folder, copy the `best.pt` path, or choose **Select production model** to write `results/selected_model.json` with the exact SHA-256. In **Vision**, use **Use selected Results model** to load that exact checkpoint even if the saved camera profile points at an older model, or choose a completed run from the Vision run list and use **Use run best.pt**. Vision refreshes those choices when the page is opened and verifies recorded hashes before loading. Selection is a local candidate choice, not an organizer signature, lock, or hidden score.
 

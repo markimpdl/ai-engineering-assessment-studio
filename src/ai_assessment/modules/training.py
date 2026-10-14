@@ -84,7 +84,7 @@ class TrainingPage(QWidget):
         eyebrow.setObjectName("trainingEyebrow")
         title = QLabel("Training Studio")
         title.setObjectName("trainingTitle")
-        subtitle = QLabel("Record up to four distinct local YOLO experiments against the selected four-class subset. Validation results are candidate-visible only.")
+        subtitle = QLabel("Record YOLO runs against the selected four-class subset. Each run keeps its own results and checkpoints for comparison.")
         subtitle.setWordWrap(True)
         subtitle.setObjectName("trainingSubtitle")
         root.addWidget(eyebrow)
@@ -126,8 +126,8 @@ class TrainingPage(QWidget):
 
         config = QGroupBox("Experiment configuration")
         form = QFormLayout(config)
-        self.experiment_combo = QComboBox()
-        self.experiment_combo.addItems(["Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"])
+        self.run_number = self._spin(1, 2_147_483_647, 1)
+        self.run_number.setToolTip("Defaults to the next recorded run number; choose another positive number if needed.")
         self.epochs = self._spin(1, 1000, 10)
         self.image_size = self._spin(32, 2048, 640)
         self.batch = self._spin(1, 512, 8)
@@ -139,7 +139,7 @@ class TrainingPage(QWidget):
         self.amp = QCheckBox("Enable AMP (may download yolo26n.pt for checks)")
         self.amp.setChecked(False)
         self.amp.setToolTip("Off: FP32 still uses the selected GPU. On: Ultralytics may download yolo26n.pt for its AMP check.")
-        form.addRow("Recorded slot", self.experiment_combo)
+        form.addRow("Run number", self.run_number)
         form.addRow("Epochs", self.epochs)
         form.addRow("Image size", self.image_size)
         form.addRow("Batch", self.batch)
@@ -173,7 +173,7 @@ class TrainingPage(QWidget):
         left = QGroupBox("Recorded runs")
         left_layout = QVBoxLayout(left)
         self.runs_table = QTableWidget(0, 6)
-        self.runs_table.setHorizontalHeaderLabels(["Run", "Slot", "Status", "mAP50", "mAP50-95", "Started"])
+        self.runs_table.setHorizontalHeaderLabels(["Run", "Number", "Status", "mAP50", "mAP50-95", "Started"])
         self.runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.runs_table.itemSelectionChanged.connect(self._show_selected_run)
         left_layout.addWidget(self.runs_table)
@@ -303,7 +303,7 @@ class TrainingPage(QWidget):
             self.status.setText("Choose a complete four-class subset and a local .pt file or official model name first.")
             return
         config = TrainingConfig(
-            experiment_index=self.experiment_combo.currentIndex() + 1,
+            experiment_index=self.run_number.value(),
             epochs=self.epochs.value(),
             image_size=self.image_size.value(),
             batch=self.batch.value(),
@@ -380,6 +380,11 @@ class TrainingPage(QWidget):
 
     def _refresh_runs(self) -> None:
         records = self.service.list_runs()
+        used_numbers = [
+            number for record in records
+            if isinstance(number := record.get("experiment_index"), int) and not isinstance(number, bool) and number > 0
+        ]
+        self.run_number.setValue(min(max(used_numbers, default=0) + 1, self.run_number.maximum()))
         self.runs_table.setRowCount(0)
         for record in records:
             row = self.runs_table.rowCount()

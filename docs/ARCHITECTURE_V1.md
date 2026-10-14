@@ -44,7 +44,7 @@ The simulator must be reachable through the same documented HTTP contract as the
 |---|---|---|
 | Home | Session, stage, deadlines, connectivity, alerts | SessionService |
 | Dataset | Browse classes/images/annotations, select four, create subset, printable specimens | DatasetService, read-only source adapter |
-| Training | Configure four runs, start/stop, compare metrics and checkpoints | TrainingService, process supervisor |
+| Training | Configure local runs, start/stop, compare metrics and checkpoints | TrainingService, process supervisor |
 | Vision | Raw stream, ROI/process preview, detections and centers | CameraService, InferenceService |
 | Calibration | Select points, choose transform, click test, inspect magnifier | CalibrationService |
 | Robot | Simulator scene/state, positions, health, suction, sequence trace | RobotService and transport adapter |
@@ -117,7 +117,7 @@ Physical motion requires an explicit operator enable plus valid bounds, one comm
 
 ## 7. Training, IDE, and execution
 
-TrainingService records four distinct configurations, dataset and base-weight hashes, command/arguments, environment manifest, process start/end, run ID, logs, metrics, checkpoint hashes, and completion status. The candidate can compare mAP50, mAP50-95, precision/recall, confusion matrix, loss curves, latency and per-class performance. The selected production model must match one recorded run hash; organizer evaluator independently runs hidden tests. A candidate may continue a run only under an explicit rule identifying whether it counts as a distinct experiment.
+TrainingService records every local run with dataset and base-weight hashes, command/arguments, environment manifest, process start/end, run ID, logs, metrics, checkpoint hashes, and completion status. The practice workspace can keep more than four runs or repeat settings under distinct run IDs; any four-experiment assessment rule remains an organizer policy rather than a local UI limit. The candidate can compare mAP50, mAP50-95, precision/recall, confusion matrix, loss curves, latency and per-class performance. The selected production model must match one recorded run hash; organizer evaluator independently runs hidden tests. A candidate may continue a run only under an explicit rule identifying whether it counts as a distinct experiment.
 
 Base weights may be a local `.pt` file or a supported official Ultralytics detection checkpoint named by the student. When absent, Training downloads the named asset to the candidate workspace through the organizer-controlled router, caches it, and records source and SHA-256 before the run. The application accepts only known model names for this download path; the router or organizer proxy enforces network access. The official Windows image can retain cached weights for offline operation. Downloaded weights do not by themselves count as training evidence. The default training precision is FP32 to prevent Ultralytics' AMP check from independently fetching another checkpoint; AMP is a recorded opt-in when the official image or network supports its check.
 
@@ -175,7 +175,7 @@ Preserve source prototypes unchanged on import to `legacy/`, then extract servic
 | M3 | Dataset | Read-only originals; four-class export, labels/YAML remapped and counted |
 | M4 | Vision | Raw and annotated streams; ROI and center mapping; nonblocking stop |
 | M5 | Simulator and robot adapter | Same documented move/suction tests; fault and busy handling |
-| M6 | Training/results | Four runs and metrics; hashes; select one production model |
+| M6 | Training/results | Local runs and metrics; hashes; select one production model |
 | M7 | IDE/terminal | Edit/save/run/stop isolated candidate files; captured output |
 | M8 | AI gateway | Authenticated chat and selected context; audited usage and quota exhaustion |
 | M9 | Assessment/submission | Token activation, locks, evidence receipts, hidden scoring and official trials |

@@ -46,6 +46,8 @@ from ..services.vision import (
     save_profile,
     save_snapshot,
     validate_model_path,
+    validate_video_path,
+    validate_rtsp_url,
 )
 
 
@@ -108,7 +110,7 @@ class VisionImageView(QWidget):
         painter.fillRect(self.rect(), QColor("#eaf1f7"))
         if self.image.isNull():
             painter.setPen(QColor("#526b83"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Camera preview unavailable")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Preview unavailable")
             return
         rectangle = self.image_rect()
         painter.drawImage(rectangle, self.image)
@@ -215,7 +217,7 @@ class SliderControl(QWidget):
 
 
 class VisionPage(QWidget):
-    """Embedded raw/processed camera and local-model vision workspace."""
+    """Embedded raw/processed camera or video vision workspace."""
 
     def __init__(self, workspace: CandidateWorkspace) -> None:
         super().__init__()
@@ -227,6 +229,7 @@ class VisionPage(QWidget):
         self._worker: VisionWorker | None = None
         self._last_result: FrameResult | None = None
         self._camera_metadata: dict[str, Any] = {}
+        self._active_source_type = "camera"
         self._available_checkpoints: list[CheckpointReference] = []
         self._selected_checkpoint: CheckpointReference | None = None
         self._current_model_expected_sha: str | None = None
@@ -244,7 +247,7 @@ class VisionPage(QWidget):
         self._refresh_model_choices()
         self._load_calibration()
         if self._profile_error:
-            self.status.setText(f"Camera profile unavailable: {self._profile_error}")
+            self.status.setText(f"Vision profile unavailable: {self._profile_error}")
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._poll_frame)
@@ -259,7 +262,7 @@ class VisionPage(QWidget):
         title = QLabel("Vision Studio")
         title.setObjectName("visionTitle")
         subtitle = QLabel(
-            "View the full camera frame, draw an inference ROI, apply transparent image corrections, and inspect local-model detections without moving the robot."
+            "View a camera, looping video, or RTSP stream; draw an ROI, adjust brightness and contrast, and inspect detections without moving the robot."
         )
         subtitle.setObjectName("visionSubtitle")
         subtitle.setWordWrap(True)
@@ -280,23 +283,52 @@ class VisionPage(QWidget):
         capture_layout.setContentsMargins(9, 10, 9, 9)
         capture_layout.setHorizontalSpacing(7)
         capture_layout.setVerticalSpacing(7)
+        capture_layout.addWidget(QLabel("Input"), 0, 0)
+        self.source_combo = QComboBox()
+        self.source_combo.addItem("Camera", "camera")
+        self.source_combo.addItem("Video file (loop)", "video")
+        self.source_combo.addItem("RTSP stream", "rtsp")
+        self.source_combo.currentIndexChanged.connect(self._source_changed)
+        capture_layout.addWidget(self.source_combo, 0, 1)
         self.start_button = QPushButton("Start camera")
         self.start_button.setObjectName("visionPrimary")
-        self.start_button.clicked.connect(self._start_camera)
-        capture_layout.addWidget(self.start_button, 0, 0)
+        self.start_button.clicked.connect(self._start_source)
+        capture_layout.addWidget(self.start_button, 1, 0)
         self.stop_button = QPushButton("Stop")
         self.stop_button.setObjectName("visionStop")
-        self.stop_button.clicked.connect(self._stop_camera)
+        self.stop_button.clicked.connect(self._stop_source)
         self.stop_button.setEnabled(False)
-        capture_layout.addWidget(self.stop_button, 0, 1)
-        capture_layout.addWidget(QLabel("Camera"), 1, 0)
+        capture_layout.addWidget(self.stop_button, 1, 1)
+        capture_layout.addWidget(QLabel("Camera"), 2, 0)
         self.camera_index = QSpinBox()
         self.camera_index.setRange(0, 20)
         self.camera_index.setMaximumWidth(78)
-        capture_layout.addWidget(self.camera_index, 1, 1)
+        capture_layout.addWidget(self.camera_index, 2, 1)
+        capture_layout.addWidget(QLabel("Video file"), 3, 0)
+        self.video_path = QLineEdit()
+        self.video_path.setPlaceholderText("Choose a local video")
+        self.video_path.editingFinished.connect(self._save_profile)
+        capture_layout.addWidget(self.video_path, 3, 1)
+        self.browse_video_button = QPushButton("Browse video...")
+        self.browse_video_button.setObjectName("visionSecondary")
+        self.browse_video_button.clicked.connect(self._browse_video)
+        capture_layout.addWidget(self.browse_video_button, 4, 0, 1, 2)
+        capture_layout.addWidget(QLabel("RTSP URL"), 5, 0)
+        self.rtsp_url = QLineEdit()
+        self.rtsp_url.setPlaceholderText("rtsp://host:8554/stream")
+        self.rtsp_url.setToolTip("Enter a live RTSP address. Changes during playback take effect after Stop and Start.")
+        self.rtsp_url.editingFinished.connect(self._rtsp_url_changed)
+        capture_layout.addWidget(self.rtsp_url, 5, 1)
+        self.show_rtsp_url = QCheckBox("Hide RTSP URL")
+        self.show_rtsp_url.toggled.connect(
+            lambda checked: self.rtsp_url.setEchoMode(
+                QLineEdit.EchoMode.Password if checked else QLineEdit.EchoMode.Normal
+            )
+        )
+        capture_layout.addWidget(self.show_rtsp_url, 6, 0, 1, 2)
         self.device_label = QLabel("Device: preview only")
         self.device_label.setObjectName("visionDevice")
-        capture_layout.addWidget(self.device_label, 2, 0, 1, 2)
+        capture_layout.addWidget(self.device_label, 7, 0, 1, 2)
         controls_layout.addWidget(capture_group)
 
         model_group = QGroupBox("Local model")
@@ -372,9 +404,9 @@ class VisionPage(QWidget):
         inference_layout.setColumnStretch(1, 1)
         controls_layout.addWidget(inference_group)
 
-        camera_group = QGroupBox("Camera properties")
-        camera_group.setObjectName("visionControlGroup")
-        camera_layout = QGridLayout(camera_group)
+        self.camera_group = QGroupBox("Camera properties")
+        self.camera_group.setObjectName("visionControlGroup")
+        camera_layout = QGridLayout(self.camera_group)
         camera_layout.setContentsMargins(9, 10, 9, 9)
         camera_layout.setHorizontalSpacing(7)
         camera_layout.setVerticalSpacing(6)
@@ -397,12 +429,12 @@ class VisionPage(QWidget):
             camera_layout.addWidget(auto_control, index, 0)
             camera_layout.addWidget(value_control, index, 1)
         camera_layout.setColumnStretch(1, 1)
-        controls_layout.addWidget(camera_group)
+        controls_layout.addWidget(self.camera_group)
 
         action_row = QGridLayout()
         action_row.setHorizontalSpacing(7)
         action_row.setVerticalSpacing(7)
-        self.save_profile_button = QPushButton("Save camera profile")
+        self.save_profile_button = QPushButton("Save vision profile")
         self.save_profile_button.setObjectName("visionSecondary")
         self.save_profile_button.clicked.connect(self._save_profile)
         action_row.addWidget(self.save_profile_button, 0, 0)
@@ -528,6 +560,8 @@ class VisionPage(QWidget):
         self._applying_profile = True
         try:
             profile = self._profile
+            self.source_combo.setCurrentIndex({"camera": 0, "video": 1, "rtsp": 2}.get(profile.source_type, 0))
+            self.video_path.setText(profile.video_path or "")
             self.camera_index.setValue(profile.camera_index)
             self.confidence.setValue(profile.confidence)
             self.brightness.setValue(int(profile.brightness))
@@ -546,14 +580,17 @@ class VisionPage(QWidget):
             if profile.model_path:
                 self.model_path.setText(profile.model_path)
                 self._current_model_expected_sha = profile.model_sha256
-                self._current_model_label = "saved camera profile model"
+                self._current_model_label = "saved vision profile model"
             if profile.roi:
                 self._set_roi_from_mapping(profile.roi, log_event=False)
         finally:
             self._applying_profile = False
+            self._update_source_controls()
 
     def _settings(self) -> dict[str, Any]:
         return {
+            "source_type": self.source_combo.currentData(),
+            "video_path": self.video_path.text().strip() or None,
             "roi": list(self.raw_view.roi) if self.raw_view.roi else None,
             "brightness": float(self.brightness.value()),
             "contrast": float(self.contrast.value()),
@@ -569,6 +606,74 @@ class VisionPage(QWidget):
             "model_path": self.model_path.text().strip() or None,
             "model_sha256": self._current_model_expected_sha,
         }
+
+    def _update_source_controls(self) -> None:
+        source = self.source_combo.currentData()
+        camera = source == "camera"
+        video = source == "video"
+        stream = source == "rtsp"
+        self.camera_index.setEnabled(camera)
+        self.camera_group.setEnabled(camera)
+        self.video_path.setEnabled(video and self._thread is None)
+        self.browse_video_button.setEnabled(video and self._thread is None)
+        # The address can be prepared while another source is selected or playing.
+        # A running worker keeps its original URL until Stop and Start.
+        self.rtsp_url.setEnabled(True)
+        self.show_rtsp_url.setEnabled(True)
+        self.start_button.setText({"camera": "Start camera", "video": "Start video", "rtsp": "Start stream"}[source])
+
+    def _source_changed(self, *_args: Any) -> None:
+        self._update_source_controls()
+        if self._applying_profile or self._thread is not None:
+            return
+        self.buffer.clear()
+        self._last_result = None
+        self._camera_metadata = {}
+        self._profile.frame_size = None
+        self.raw_view.set_image(QImage())
+        self.raw_view.set_roi(None)
+        self.processed_view.set_image(QImage())
+        self.roi_label.setText("ROI: full frame")
+        self.snapshot_button.setEnabled(False)
+        self.camera_readback.setText({
+            "camera": "Camera requested/read-back values appear after start.",
+            "video": "Video playback loops continuously.",
+            "rtsp": "RTSP connection status appears after start.",
+        }[self.source_combo.currentData()])
+        self.status.setText({
+            "camera": "Click Start camera for a live preview.",
+            "video": "Select a video and click Start video.",
+            "rtsp": "Enter an RTSP URL and click Start stream.",
+        }[self.source_combo.currentData()])
+        self._save_profile()
+
+    def _rtsp_url_changed(self) -> None:
+        if self._applying_profile or not self.rtsp_url.text().strip():
+            return
+        if self._thread is not None:
+            self.status.setText(
+                "RTSP URL edited. Stop and Start stream to use it."
+                if self.source_combo.currentData() == "rtsp"
+                else "RTSP URL edited. Stop the current input, select RTSP, then Start stream."
+            )
+            return
+        self.source_combo.setCurrentIndex(2)
+        self.status.setText("RTSP URL ready. Click Start stream to connect.")
+
+    def _browse_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose local video", "",
+            "Videos (*.mp4 *.mov *.m4v *.avi *.mkv *.webm *.mpeg *.mpg *.wmv)",
+        )
+        if path:
+            try:
+                selected = validate_video_path(Path(path))
+            except VisionError as error:
+                self.status.setText(str(error))
+                return
+            self.video_path.setText(str(selected))
+            self.source_combo.setCurrentIndex(1)
+            self._save_profile()
 
     def _browse_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose local YOLO model", "", "YOLO models (*.pt *.onnx)")
@@ -593,7 +698,7 @@ class VisionPage(QWidget):
             return
         if self._worker is None:
             self._save_profile()
-            self.status.setText("Model selected. Start the camera to load it off the UI thread; preview does not require a model.")
+            self.status.setText("Model selected. Start the input to load it off the UI thread; preview does not require a model.")
             return
         self._worker.request_model_load(
             path,
@@ -677,21 +782,43 @@ class VisionPage(QWidget):
         self._save_profile()
         self._load_model()
 
-    def _start_camera(self) -> None:
+    def _start_source(self) -> None:
         if self._thread is not None:
             return
-        owner = CameraOwnership.current_owner()
-        if owner not in (None, "vision"):
-            self.status.setText(f"Camera is already in use by {owner}. Stop it before starting Vision Studio.")
-            return
+        source_type = self.source_combo.currentData()
+        video_path = None
+        rtsp_url = None
+        if source_type == "rtsp":
+            try:
+                rtsp_url = validate_rtsp_url(self.rtsp_url.text())
+            except VisionError as error:
+                self.status.setText(str(error))
+                return
+        elif source_type == "video":
+            try:
+                video_path = validate_video_path(Path(self.video_path.text().strip()))
+            except VisionError as error:
+                self.status.setText(str(error))
+                return
+        else:
+            owner = CameraOwnership.current_owner()
+            if owner not in (None, "vision"):
+                self.status.setText(f"Camera is already in use by {owner}. Stop it before starting Vision Studio.")
+                return
         settings = self._settings()
         self.buffer.clear()
-        self._worker = VisionWorker(self.camera_index.value(), settings, self.buffer)
+        self._last_result = None
+        self.snapshot_button.setEnabled(False)
+        self._active_source_type = source_type
+        self._worker = VisionWorker(
+            self.camera_index.value(), settings, self.buffer,
+            source_type=source_type, video_path=video_path, rtsp_url=rtsp_url,
+        )
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.metadata_ready.connect(self._metadata_ready)
-        self._worker.status.connect(self.status.setText)
+        self._worker.status.connect(self._worker_status)
         self._worker.model_status.connect(self._model_status)
         self._worker.error.connect(self._worker_error)
         self._worker.finished.connect(self._thread.quit)
@@ -701,36 +828,56 @@ class VisionPage(QWidget):
         self._thread.start()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.workspace.record_event("vision.camera.started", {"camera_index": self.camera_index.value()})
+        self.source_combo.setEnabled(False)
+        self.video_path.setEnabled(False)
+        self.browse_video_button.setEnabled(False)
+        if source_type == "rtsp":
+            self.workspace.record_event("vision.rtsp.started", {})
+        elif source_type == "video":
+            self.workspace.record_event("vision.video.started", {"path": str(video_path)})
+        else:
+            self.workspace.record_event("vision.camera.started", {"camera_index": self.camera_index.value()})
         self._save_profile()
 
-    def _stop_camera(self) -> None:
+    def _stop_source(self) -> None:
         if self._worker is not None:
             self._worker.stop()
-            self.status.setText("Stopping camera and releasing the device...")
+            self.status.setText(f"Stopping {self._active_source_type}...")
 
     @Slot()
     def _thread_finished(self) -> None:
+        source_type = self._active_source_type
         self._thread = None
         self._worker = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.workspace.record_event("vision.camera.stopped", {})
+        self.source_combo.setEnabled(True)
+        self._update_source_controls()
+        self.workspace.record_event(f"vision.{source_type}.stopped", {})
 
     @Slot(object)
     def _metadata_ready(self, metadata: dict[str, Any]) -> None:
         self._camera_metadata = dict(metadata)
-        requested = metadata.get("requested_camera", {})
         readback = metadata.get("readback_camera", {})
-        backend = metadata.get("backend") or "unknown backend"
-        self.camera_readback.setText(self._describe_camera_readback(requested, readback))
-        if readback and not any(bool(entry.get("supported")) for entry in readback.values()):
-            self.status.setText(
-                f"Camera live. The {backend} backend does not expose exposure, focus or white balance "
-                "controls, so the auto switches and sliders have no effect on this camera."
-            )
+        if metadata.get("source_type") == "rtsp":
+            self.camera_readback.setText("RTSP stream connected.")
+            self.status.setText("RTSP live. Draw an ROI or load a local model.")
+        elif metadata.get("source_type") == "video":
+            fps = metadata.get("readback_fps", 0)
+            fps_text = f"{fps:.1f} FPS" if isinstance(fps, (int, float)) and fps > 0 else "FPS unknown"
+            self.camera_readback.setText(f"Looping video: {metadata.get('video_path')} | {fps_text}")
+            self.status.setText("Video playing on repeat. Draw an ROI or load a local model.")
         else:
-            self.status.setText("Camera live. Preview is active; draw an ROI or load a local model.")
+            requested = metadata.get("requested_camera", {})
+            backend = metadata.get("backend") or "unknown backend"
+            self.camera_readback.setText(self._describe_camera_readback(requested, readback))
+            if readback and not any(bool(entry.get("supported")) for entry in readback.values()):
+                self.status.setText(
+                    f"Camera live. The {backend} backend does not expose exposure, focus or white balance "
+                    "controls, so the auto switches and sliders have no effect on this camera."
+                )
+            else:
+                self.status.setText("Camera live. Preview is active; draw an ROI or load a local model.")
         self._profile.backend = metadata.get("backend")
         self._profile.readback_camera = readback
         self._profile.frame_size = (
@@ -754,6 +901,18 @@ class VisionPage(QWidget):
         else:
             self.device_label.setText("Device: model unavailable")
             self.workspace.record_event("vision.model.load_failed", {"model": self.model_path.text(), "error": value}, outcome="failed")
+
+    @Slot(str)
+    def _worker_status(self, message: str) -> None:
+        self.status.setText(message)
+        if self._active_source_type == "rtsp" and (
+            "unavailable" in message or "interrupted" in message or message.startswith("Connecting")
+        ):
+            self.buffer.clear()
+            self._last_result = None
+            self.snapshot_button.setEnabled(False)
+            self.raw_view.set_image(QImage())
+            self.processed_view.set_image(QImage())
 
     @Slot(str)
     def _worker_error(self, message: str) -> None:
@@ -848,26 +1007,30 @@ class VisionPage(QWidget):
         self._populate_detections(result)
 
     def _populate_detections(self, result: FrameResult) -> None:
-        geometry_warning = ""
-        for detection in result.detections:
-            if self._calibration is not None:
-                try:
-                    robot_coordinates_for_detection(self._calibration, detection, result.full_frame_size)
-                except CalibrationGeometryMismatchError as error:
-                    geometry_warning = str(error)
-                except CalibrationError as error:
-                    geometry_warning = str(error)
-                if geometry_warning:
-                    break
-        if self._calibration is None:
-            self.calibration_warning.setText("No matching saved calibration loaded. Robot coordinates are not shown.")
-        elif geometry_warning:
-            self.calibration_warning.setText(geometry_warning)
+        if self._active_source_type in ("video", "rtsp"):
+            self.calibration_warning.setText("Camera calibration does not apply to this input. Robot coordinates are not shown.")
         else:
-            self.calibration_warning.setText("Saved calibration matches the current full-frame geometry.")
+            geometry_warning = ""
+            for detection in result.detections:
+                if self._calibration is not None:
+                    try:
+                        robot_coordinates_for_detection(self._calibration, detection, result.full_frame_size)
+                    except CalibrationGeometryMismatchError as error:
+                        geometry_warning = str(error)
+                    except CalibrationError as error:
+                        geometry_warning = str(error)
+                    if geometry_warning:
+                        break
+            if self._calibration is None:
+                self.calibration_warning.setText("No matching saved calibration loaded. Robot coordinates are not shown.")
+            elif geometry_warning:
+                self.calibration_warning.setText(geometry_warning)
+            else:
+                self.calibration_warning.setText("Saved calibration matches the current full-frame geometry.")
         count = len(result.detections)
         if count:
-            self.status.setText(f"Camera live. {count} detection{'s' if count != 1 else ''} in the current frame.")
+            source = {"camera": "Camera live", "video": "Video playing on repeat", "rtsp": "RTSP live"}[self._active_source_type]
+            self.status.setText(f"{source}. {count} detection{'s' if count != 1 else ''} in the current frame.")
 
     def _load_calibration(self) -> None:
         path = self.workspace.resolve_inside("calibration", "calibration.json")
@@ -886,6 +1049,8 @@ class VisionPage(QWidget):
         try:
             model_text = self.model_path.text().strip() or None
             model_path = Path(model_text) if model_text else None
+            self._profile.source_type = self.source_combo.currentData()
+            self._profile.video_path = self.video_path.text().strip() or None
             self._profile.camera_index = self.camera_index.value()
             self._profile.confidence = self.confidence.value()
             self._profile.brightness = self.brightness.value()
@@ -918,7 +1083,8 @@ class VisionPage(QWidget):
                 self.workspace.root,
                 self._last_result,
                 {
-                    "camera": self._camera_metadata,
+                    "source": self._camera_metadata,
+                    "camera": self._camera_metadata if self._active_source_type == "camera" else None,
                     "confidence": self.confidence.value(),
                     "brightness": self.brightness.value(),
                     "contrast": self.contrast.value(),
@@ -937,8 +1103,8 @@ class VisionPage(QWidget):
     def shutdown(self) -> None:
         if hasattr(self, "_timer"):
             self._timer.stop()
-        self._stop_camera()
+        self._stop_source()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(3000)
+            self._thread.wait(7000)
         self._save_profile()

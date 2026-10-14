@@ -516,8 +516,8 @@ class TrainingService:
     ) -> TrainingRun:
         if config.resume:
             raise TrainingError("Resuming is not a new distinct experiment; reopen the existing run instead.")
-        if config.experiment_index not in {1, 2, 3, 4}:
-            raise TrainingError("Choose experiment 1, 2, 3, or 4.")
+        if isinstance(config.experiment_index, bool) or not isinstance(config.experiment_index, int) or config.experiment_index < 1:
+            raise TrainingError("Run number must be a positive integer.")
         dataset = validate_subset(self.workspace, subset_root)
         with self._jobs_lock:
             if self.workspace.root in self._workspace_jobs:
@@ -525,8 +525,6 @@ class TrainingService:
             existing_records = self.list_runs()
             if any(record.get("status") == "running" for record in existing_records):
                 raise TrainingBusyError("A previous training job is still recorded as running; inspect or recover it before starting another.")
-            if sum(record.get("status") == "completed" for record in existing_records) >= 4:
-                raise TrainingError("This workspace already contains four completed experiment runs.")
         weight, weight_source = resolve_base_weights(self.workspace, weight_path, on_output=on_output)
         weight_hash = model_sha256(weight)
         if weight_source.get("downloaded_this_run"):
@@ -544,12 +542,7 @@ class TrainingService:
             records = self.list_runs()
             if any(record.get("status") == "running" for record in records):
                 raise TrainingBusyError("A previous training job is still recorded as running; inspect or recover it before starting another.")
-            completed_runs = [record for record in records if record.get("status") == "completed"]
-            if len(completed_runs) >= 4:
-                raise TrainingError("This workspace already contains four completed experiment runs.")
             fingerprint = self._config_fingerprint(config, dataset, weight_hash)
-            if any(record.get("config_fingerprint") == fingerprint for record in completed_runs):
-                raise TrainingError("This experiment configuration was already completed; change a parameter before starting another run.")
             run_id = f"run_{config.experiment_index:02d}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:6]}"
             model_dir = self.workspace.resolve_inside("models", run_id)
             result_dir = self.workspace.resolve_inside("results", "training", run_id)
