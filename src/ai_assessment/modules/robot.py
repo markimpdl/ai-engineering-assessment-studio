@@ -448,12 +448,18 @@ class RobotPage(QWidget):
             destination = QComboBox()
             destination.addItems(sorted(POSITIONS))
             destination.setCurrentText(sorted(POSITIONS)[index % len(POSITIONS)])
-            destination.currentTextChanged.connect(self._set_selected_mapping)
+            destination.currentTextChanged.connect(
+                lambda _text, class_name=name: self._sync_trial_destination(class_name)
+            )
             self.mapping_table.setCellWidget(index, 1, destination)
         if names:
             self._sync_trial_destination(names[0])
 
     def _sync_trial_destination(self, class_name: str) -> None:
+        """Show a mapping row's destination in the trial selector when it is the selected class."""
+
+        if class_name != self.trial_class.currentText():
+            return
         for row in range(self.mapping_table.rowCount()):
             item = self.mapping_table.item(row, 0)
             if item is not None and item.text() == class_name:

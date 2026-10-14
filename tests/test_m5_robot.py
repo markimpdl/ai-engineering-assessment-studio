@@ -207,3 +207,50 @@ class M5RobotTests(unittest.TestCase):
         finally:
             simulator.stop()
 
+
+
+class RobotPageMappingTests(unittest.TestCase):
+    def test_changing_one_class_destination_does_not_change_the_selected_class(self) -> None:
+        import json
+        from unittest import mock
+
+        from PySide6.QtWidgets import QApplication
+
+        from ai_assessment.modules.robot import RobotPage
+
+        app = QApplication.instance() or QApplication([])
+        del app
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = CandidateWorkspace.create(Path(directory) / "C014", candidate_id="C014")
+            manifest = workspace.root / "dataset" / "subset" / "manifest.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "selected_order": [3, 7],
+                        "selected_class_mapping": {"3": {"name": "date"}, "7": {"name": "lemon"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(RobotPage, "_start_embedded_simulator"):
+                page = RobotPage(workspace)
+            try:
+                first, second = (page.mapping_table.cellWidget(row, 1) for row in range(2))
+                self.assertEqual(page.trial_class.currentText(), "date")
+
+                first.setCurrentText("P2")
+                second.setCurrentText("P3")
+
+                self.assertEqual(first.currentText(), "P2")
+                self.assertEqual(second.currentText(), "P3")
+                self.assertEqual(page.trial_destination.currentText(), "P2")
+
+                # The trial selector still edits the selected class only.
+                page.trial_destination.setCurrentText("P4")
+                self.assertEqual(first.currentText(), "P4")
+                self.assertEqual(second.currentText(), "P3")
+                page.trial_class.setCurrentText("lemon")
+                self.assertEqual(page.trial_destination.currentText(), "P3")
+            finally:
+                page.shutdown()
