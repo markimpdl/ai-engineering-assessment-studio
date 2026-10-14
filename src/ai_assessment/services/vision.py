@@ -447,37 +447,82 @@ CAMERA_PROPERTY_NAMES = {
     "white_balance": "CAP_PROP_WB_TEMPERATURE",
 }
 
+# Each automatic switch and the manual value it controls. The switch is written first; the
+# manual value is only written while the switch is off, because every OpenCV camera backend
+# (DirectShow, Media Foundation, V4L2) forces manual mode when a manual value is written.
+CAMERA_AUTO_PAIRS = (
+    ("auto_exposure", "exposure"),
+    ("autofocus", "focus"),
+    ("auto_white_balance", "white_balance"),
+)
+
+
+def _write_camera_property(capture: Any, name: str, raw_requested_value: Any) -> dict[str, Any]:
+    prop = getattr(cv2, CAMERA_PROPERTY_NAMES[name], None)
+    if prop is None:
+        return {"requested": raw_requested_value, "actual": None, "accepted": False, "supported": False}
+    try:
+        requested_value = float(raw_requested_value)
+        accepted = bool(capture.set(prop, requested_value))
+        actual = float(capture.get(prop))
+        return {
+            "requested": requested_value,
+            "actual": actual if np.isfinite(actual) else None,
+            "accepted": accepted,
+            # Backends that do not implement a property (e.g. AVFoundation on macOS) return
+            # False from set() and 0 or -1 from get(), so only an accepted write counts.
+            "supported": accepted,
+        }
+    except Exception as error:
+        return {
+            "requested": raw_requested_value,
+            "actual": None,
+            "accepted": False,
+            "supported": False,
+            "error": str(error),
+        }
+
+
+def _read_camera_property(capture: Any, name: str) -> float | None:
+    prop = getattr(cv2, CAMERA_PROPERTY_NAMES[name], None)
+    if prop is None:
+        return None
+    try:
+        actual = float(capture.get(prop))
+    except Exception:
+        return None
+    return actual if np.isfinite(actual) else None
+
 
 def apply_camera_properties(capture: Any, requested: Mapping[str, Any]) -> dict[str, Any]:
-    """Request driver properties and return values read back from the driver."""
+    """Request driver properties and return values read back from the driver.
+
+    The automatic switch of each pair is applied before its manual value, and the manual
+    value is skipped (reported with ``mode == "auto"``) while the switch is on, so enabling
+    auto exposure/focus/white balance is not immediately undone by the manual slider.
+    """
 
     readback: dict[str, Any] = {}
-    for name, constant_name in CAMERA_PROPERTY_NAMES.items():
-        if name not in requested or requested[name] is None:
+    for auto_name, manual_name in CAMERA_AUTO_PAIRS:
+        auto_requested = requested.get(auto_name)
+        auto_enabled = auto_requested is not None and float(auto_requested) != 0.0
+        if auto_requested is not None:
+            readback[auto_name] = _write_camera_property(capture, auto_name, auto_requested)
+            readback[auto_name]["mode"] = "auto" if auto_enabled else "manual"
+        manual_requested = requested.get(manual_name)
+        if manual_requested is None:
             continue
-        prop = getattr(cv2, constant_name, None)
-        if prop is None:
-            readback[name] = {"requested": requested[name], "actual": None, "supported": False}
-            continue
-        raw_requested_value = requested[name]
-        try:
-            requested_value = float(raw_requested_value)
-            accepted = bool(capture.set(prop, requested_value))
-            actual = float(capture.get(prop))
-            readback[name] = {
-                "requested": requested_value,
-                "actual": actual,
-                "accepted": accepted,
-                "supported": bool(accepted or np.isfinite(actual)),
+        if auto_enabled:
+            readback[manual_name] = {
+                "requested": float(manual_requested),
+                "actual": _read_camera_property(capture, manual_name),
+                "accepted": None,
+                "supported": bool(readback[auto_name]["supported"]),
+                "mode": "auto",
             }
-        except Exception as error:
-            readback[name] = {
-                "requested": raw_requested_value,
-                "actual": None,
-                "accepted": False,
-                "supported": False,
-                "error": str(error),
-            }
+        else:
+            readback[manual_name] = _write_camera_property(capture, manual_name, manual_requested)
+            readback[manual_name]["mode"] = "manual"
     return readback
 
 

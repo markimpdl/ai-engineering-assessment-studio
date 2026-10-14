@@ -21,11 +21,13 @@ from typing import Any, Callable, Mapping, Protocol
 import yaml
 
 from ..core.workspace import CandidateWorkspace
+from .remote_training import SERVER_TOKEN_ENV, SERVER_URL_ENV, RemoteTrainingClient, parse_server_address
 from .vision import model_sha256, validate_model_path
 
 
 TRAINING_SCHEMA_VERSION = "m6.training.v1"
 RUN_RECORD_NAME = "run.json"
+SERVER_SETTINGS_NAME = "training_server.json"
 _PROGRESS_PATTERN = re.compile(r"(?:Epoch\s+)?(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 
 # Official Ultralytics detection checkpoints accepted by name. Keep this list
@@ -378,10 +380,56 @@ class TrainingService:
         *,
         python_executable: str | None = None,
         process_factory: Callable[..., ProcessLike] = subprocess.Popen,
+        remote_client: RemoteTrainingClient | None = None,
     ) -> None:
         self.workspace = workspace
         self.python_executable = python_executable or sys.executable
         self.process_factory = process_factory
+        # A configured LAN server runs the job when reachable; an injected
+        # process factory (tests) keeps execution local.
+        if remote_client is None and process_factory is subprocess.Popen:
+            try:
+                remote_client = self._client_for(parse_server_address(self.server_address()))
+            except ValueError:
+                remote_client = None
+        self.remote_client = remote_client
+
+    def _server_settings_path(self) -> Path:
+        return self.workspace.resolve_inside("results", SERVER_SETTINGS_NAME)
+
+    def server_address(self) -> str:
+        """The saved training server address, else the operator environment default."""
+        path = self._server_settings_path()
+        if path.is_file():
+            try:
+                return str(json.loads(path.read_text(encoding="utf-8")).get("address", ""))
+            except (OSError, ValueError, AttributeError):
+                return ""
+        return os.environ.get(SERVER_URL_ENV, "")
+
+    def set_server_address(self, text: str) -> tuple[str | None, str | None]:
+        """Save the address and return (server URL or None for this PC, validation error)."""
+        error: str | None = None
+        try:
+            url = parse_server_address(text)
+        except ValueError as exc:
+            url, error = None, str(exc)
+        path = self._server_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_json_write(path, {"address": text.strip(), "server_url": url, "updated_at": utc_now_iso()})
+        self.remote_client = self._client_for(url)
+        self.workspace.record_event("training.server.configured", {"address": text.strip(), "server_url": url, "valid": error is None})
+        return url, error
+
+    def _client_for(self, url: str | None) -> RemoteTrainingClient | None:
+        if url is None:
+            return None
+        return RemoteTrainingClient(
+            url,
+            os.environ.get(SERVER_TOKEN_ENV, "").strip(),
+            candidate_id=self.workspace.session.candidate_id,
+            client_id=self.workspace.session.session_id,
+        )
 
     @property
     def active_run_id(self) -> str | None:
@@ -548,7 +596,7 @@ class TrainingService:
             _safe_json_write(record_path, record)
             self.workspace.record_event("training.started", {"run_id": run_id, "experiment_index": config.experiment_index, "config": config.to_dict(), "dataset_manifest_sha256": dataset.manifest_sha256, "base_weight_sha256": weight_hash})
             try:
-                process = self._launch(args)
+                process, executor = self._dispatch(run_id, args)
             except Exception as error:
                 record["status"] = "failed"
                 record["outcome"] = "failed"
@@ -557,11 +605,26 @@ class TrainingService:
                 _safe_json_write(record_path, record)
                 self.workspace.record_event("training.failed", {"run_id": run_id, "error": str(error)}, outcome="failed")
                 raise TrainingError(record["error"]) from error
+            record["executor"] = executor
+            _safe_json_write(record_path, record)
             job = TrainingJob(run_id, process, record, record_path, log_path, on_output, on_progress, on_complete)
             self._workspace_jobs[workspace_key] = job
             job.thread = threading.Thread(target=self._monitor, args=(job,), name=f"training-{run_id}", daemon=True)
             job.thread.start()
             return TrainingRun(run_id, record_path, log_path, model_dir, result_dir, "running")
+
+    def _dispatch(self, run_id: str, args: list[str]) -> tuple[ProcessLike, dict[str, Any]]:
+        """Prefer the configured training server; fall back to this PC silently."""
+        if self.remote_client is None:
+            return self._launch(args), {"kind": "local"}
+        try:
+            process = self.remote_client.launch(args)
+        except Exception as error:  # any dispatch failure keeps the candidate training locally
+            self.workspace.record_event("training.remote.fallback", {"run_id": run_id, "server": self.remote_client.base_url, "reason": str(error)})
+            return self._launch(args), {"kind": "local", "remote_server": self.remote_client.base_url, "remote_fallback_reason": str(error)}
+        executor = process.executor_record
+        self.workspace.record_event("training.remote.dispatched", {"run_id": run_id, "server": executor["server"], "job_id": executor["job_id"]})
+        return process, executor
 
     def _launch(self, args: list[str]) -> ProcessLike:
         # The Windows locale can be cp1252 while YOLO prints UTF-8/ANSI output.
@@ -677,10 +740,13 @@ class TrainingService:
                     job.process.terminate()
             else:
                 job.process.terminate()
-            try:
-                job.process.wait()
-            except Exception:
-                job.process.kill()
+            # A remote job finishes and downloads its artifacts in the monitor
+            # thread; waiting here would block the caller on the network.
+            if not getattr(job.process, "is_remote", False):
+                try:
+                    job.process.wait()
+                except Exception:
+                    job.process.kill()
         except Exception as error:
             self.workspace.record_event("training.cancellation.error", {"run_id": job.run_id, "error": str(error)}, outcome="failed")
         return True

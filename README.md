@@ -32,7 +32,7 @@ If the repository is in a different folder, replace the `cd` path. The editable 
 
 ## Run the shell and tests
 
-Create or reopen the default `C014` workspace and launch the desktop shell:
+Create or reopen the default `C014` workspace and launch the desktop shell. A new workspace takes its candidate ID from the folder name, so each student can use their own folder, for example `--workspace candidate_workspaces\aluno1`; the sidebar shows both the ID and the workspace folder. Pass `--candidate-id` only to override that name:
 
 ```bat
 python -m ai_assessment --workspace candidate_workspaces\C014
@@ -143,6 +143,24 @@ python -m unittest discover -s tests -v
 ```
 
 A real Windows GPU run is still required to verify Ultralytics, CUDA/PyTorch compatibility, training duration, checkpoint production, and metric plots on the official image.
+
+### Optional LAN training server
+
+An operator can run training for several candidate PCs on one faster machine on the same local network, such as an Apple silicon Mac. On the **Training** page, enter the server address in **Server IP** (below **Base weights**, for example `192.168.1.228`, or `host:port` when the server does not use port 8766) and press **Test server** to check it. With a valid address, the desktop uploads the selected subset and base weights, streams the server's console output into the same log and progress bar with server paths rewritten to the candidate's own paths, and extracts `best.pt`, `results.csv`, plots, and metrics into the same `models/<run-id>/` and `results/training/<run-id>/` folders before the run is recorded. A blank or invalid address trains on this PC. When the server is unreachable or rejects the job, training also starts on this PC and the status line says so. The address is saved in `results/training_server.json` in the candidate workspace. Run records, hashes, the four-experiment rule, cancellation, and production-model selection stay on the candidate PC; each `run.json` records an `executor` entry (server, job ID, and server environment, or the local fallback reason).
+
+On the server machine (Python 3.12, from the repository root):
+
+```sh
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -e ".[training-server]"
+python -m server.run_training_server
+```
+
+The server prints its LAN address and a dashboard URL (`http://<server-ip>:8766/`) listing running, queued, and finished jobs. By default it runs in open LAN mode: each desktop identifies itself with its workspace candidate ID and session ID, so several PCs that share a candidate ID such as `C014` still get separate jobs. It runs up to `--max-concurrent` jobs at once (default 4; one active job per PC, further jobs wait in a queue), maps a blank or CUDA device to Apple `mps` (an explicit `cpu` stays CPU), uses `--default-workers` data loaders when the candidate leaves workers at 0, stops a job after `--max-job-hours`, and keeps macOS awake with `caffeinate` while it runs. Allow incoming connections for Python if the macOS firewall asks. Ultralytics prints the actual device (for example `MPS (Apple M5 Pro)`) in the training log.
+
+For per-candidate tokens instead, start the server with `--token-mode --student C014 --student C015`; tokens are generated once and kept in `~/ai-assessment-training-server/students.json`, and each PC sets its token once with `setx AI_TRAINING_SERVER_TOKEN <token>`. An `AI_TRAINING_SERVER_URL` environment variable pre-fills **Server IP** until the field is first saved.
+
+The server is a classroom convenience on a trusted network, not an assessment security boundary: traffic is plain HTTP, open mode trusts the identity each desktop sends, and the dashboard needs no token. If the network drops during a run, the desktop keeps retrying for ten minutes before recording the run as failed; closing the Studio cancels the remote job, as it cancels a local one.
 
 ## M8 AI Assistant and organizer gateway
 

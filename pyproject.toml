@@ -28,6 +28,12 @@ server = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",
 ]
+training-server = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "PyYAML>=6,<7",
+    "ultralytics>=8.3,<9",
+]
 server-live = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",

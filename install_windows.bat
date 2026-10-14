@@ -119,8 +119,8 @@ echo To enable GPU training, install or update the NVIDIA driver and rerun this 
 
 :install_gui
 echo.
-echo Installing the GUI dependencies and editable project package...
-call "%CONDA_CMD%" run --no-capture-output -n "%ENV_NAME%" python -m pip install -e ".[gui]"
+echo Installing the GUI and training-server dependencies with the editable project package...
+call "%CONDA_CMD%" run --no-capture-output -n "%ENV_NAME%" python -m pip install -e ".[gui,training-server]"
 if errorlevel 1 goto :install_fail
 
 echo.
@@ -148,6 +148,9 @@ echo In PowerShell, run:
 echo   conda activate %ENV_NAME%
 echo   python -m ai_assessment.app --headless-check --workspace candidate_workspaces\C014
 echo   python -m ai_assessment.app --workspace candidate_workspaces\C014
+echo.
+echo To host the LAN training server from this environment, run from the repository root:
+echo   python -m server.run_training_server
 echo.
 echo No model weights or datasets were downloaded by this setup script.
 popd

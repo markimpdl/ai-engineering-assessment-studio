@@ -112,6 +112,16 @@ class TrainingPage(QWidget):
         source_layout.addWidget(QLabel("Base weights"), 1, 0)
         source_layout.addWidget(self.weight_edit, 1, 1, 1, 2)
         source_layout.addWidget(self.weight_browse, 1, 3)
+        self.server_edit = QLineEdit(self.service.server_address())
+        self.server_edit.setPlaceholderText("Training server IP, e.g. 192.168.1.228 (blank = train on this PC)")
+        self.server_edit.setToolTip("With a valid server address, training runs on that server and its results are copied back here. Blank or invalid: training runs on this PC.")
+        self.server_edit.editingFinished.connect(self._apply_server_address)
+        self.server_test_button = QPushButton("Test server")
+        self.server_test_button.clicked.connect(self._test_server)
+        self._applied_server_text = self.server_edit.text().strip()
+        source_layout.addWidget(QLabel("Server IP"), 2, 0)
+        source_layout.addWidget(self.server_edit, 2, 1, 1, 2)
+        source_layout.addWidget(self.server_test_button, 2, 3)
         root.addWidget(source)
 
         config = QGroupBox("Experiment configuration")
@@ -242,7 +252,51 @@ class TrainingPage(QWidget):
         if path:
             self.weight_edit.setText(path)
 
+    def _apply_server_address(self, *, force: bool = False) -> str | None:
+        text = self.server_edit.text().strip()
+        changed = text != self._applied_server_text
+        if not changed and not force:
+            return self.service.remote_client.base_url if self.service.remote_client else None
+        url, error = self.service.set_server_address(text)
+        self._applied_server_text = text
+        if error:
+            self.status.setText(f"{error}. Training will run on this PC.")
+        elif changed:
+            self.status.setText(f"Training server set to {url}. Press Test server to check it." if url else "No training server set. Training will run on this PC.")
+        return url
+
+    def _test_server(self) -> None:
+        url = self._apply_server_address(force=True)
+        client = self.service.remote_client
+        if url is None or client is None:
+            if not self.server_edit.text().strip():
+                self.status.setText("No training server set. Training will run on this PC.")
+            return
+        self.server_test_button.setEnabled(False)
+        self.status.setText(f"Testing training server {url} ...")
+        task = TrainingStartTask(lambda: (url, client.health()))
+        task.signals.started.connect(self._server_test_passed)
+        task.signals.failed.connect(self._server_test_failed)
+        task.signals.finished.connect(self._server_test_finished)
+        self.thread_pool.start(task)
+
+    def _server_test_finished(self) -> None:
+        self.server_test_button.setEnabled(self.start_button.isEnabled())
+
+    def _server_test_passed(self, result: object) -> None:
+        url, health = result if isinstance(result, tuple) else ("", {})
+        value = health if isinstance(health, dict) else {}
+        device = value.get("accelerator") or "server default"
+        self.status.setText(
+            f"Training server {url} is reachable ({device}; {value.get('running', 0)}/{value.get('max_concurrent', '?')} jobs running, "
+            f"{value.get('queued', 0)} queued). Training will run on the server."
+        )
+
+    def _server_test_failed(self, message: str) -> None:
+        self.status.setText(f"Server test failed: {message} Training will run on this PC until the server is reachable.")
+
     def _start_training(self) -> None:
+        self._apply_server_address()
         raw_subset = self.subset_combo.currentData()
         raw_weight = self.weight_edit.text().strip()
         if not raw_subset or not raw_weight:
@@ -279,7 +333,17 @@ class TrainingPage(QWidget):
 
     def _run_started(self, run: object) -> None:
         self.current_run_id = getattr(run, "run_id", None)
-        self.status.setText(f"Training started: {self.current_run_id}")
+        executor: dict[str, Any] = {}
+        try:
+            executor = self.service.load_run(str(self.current_run_id)).get("executor") or {}
+        except TrainingError:
+            pass
+        if executor.get("kind") == "remote":
+            self.status.setText(f"Training started on server {executor.get('server', '')}: {self.current_run_id}")
+        elif executor.get("remote_fallback_reason"):
+            self.status.setText(f"Training server unavailable; training started on this PC: {self.current_run_id}")
+        else:
+            self.status.setText(f"Training started on this PC: {self.current_run_id}")
 
     def _start_failed(self, message: str) -> None:
         self._set_running(False)
@@ -294,6 +358,8 @@ class TrainingPage(QWidget):
         self.cancel_button.setEnabled(running)
         self.refresh_subset_button.setEnabled(not running)
         self.refresh_runs_button.setEnabled(not running)
+        self.server_edit.setEnabled(not running)
+        self.server_test_button.setEnabled(not running)
 
     @Slot(str)
     def _append_log(self, line: str) -> None:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -65,7 +66,7 @@ class VisionImageView(QWidget):
 
     def __init__(self, *, interactive_roi: bool = False) -> None:
         super().__init__()
-        self.setMinimumSize(360, 260)
+        self.setMinimumSize(320, 240)
         self.setMouseTracking(True)
         self.setCursor(
             Qt.CursorShape.CrossCursor if interactive_roi else Qt.CursorShape.ArrowCursor
@@ -269,7 +270,6 @@ class VisionPage(QWidget):
         controls = QFrame()
         controls.setObjectName("visionCard")
         controls.setMinimumWidth(0)
-        controls.setMaximumWidth(430)
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(12, 10, 12, 10)
         controls_layout.setSpacing(7)
@@ -302,7 +302,6 @@ class VisionPage(QWidget):
         model_group = QGroupBox("Local model")
         model_group.setObjectName("visionControlGroup")
         model_group.setMinimumWidth(0)
-        model_group.setMaximumHeight(220)
         model_layout = QGridLayout(model_group)
         model_layout.setContentsMargins(9, 10, 9, 9)
         model_layout.setHorizontalSpacing(7)
@@ -336,14 +335,14 @@ class VisionPage(QWidget):
         model_layout.addWidget(QLabel("Completed run"), 2, 0)
         self.run_model_combo = QComboBox()
         self.run_model_combo.currentIndexChanged.connect(self._run_model_changed)
-        model_layout.addWidget(self.run_model_combo, 2, 1, 1, 2)
+        model_layout.addWidget(self.run_model_combo, 2, 1)
         self.run_checkpoint_label = QLabel("No completed run checkpoint found.")
         self.run_checkpoint_label.setObjectName("visionModelPath")
         self.run_checkpoint_label.setMinimumWidth(0)
         self.run_checkpoint_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.run_checkpoint_label.setWordWrap(True)
         self.run_checkpoint_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        model_layout.addWidget(self.run_checkpoint_label, 3, 1, 1, 5)
+        model_layout.addWidget(self.run_checkpoint_label, 2, 2)
         refresh_runs = QPushButton("Refresh runs")
         refresh_runs.setObjectName("visionSecondary")
         refresh_runs.clicked.connect(self._refresh_model_choices)
@@ -368,10 +367,9 @@ class VisionPage(QWidget):
         for index, (label, widget) in enumerate(
             (("Confidence", self.confidence), ("Brightness", self.brightness), ("Contrast", self.contrast))
         ):
-            row = index * 2
-            inference_layout.addWidget(QLabel(label), row, 0)
-            inference_layout.addWidget(widget, row + 1, 0, 1, 2)
-        inference_layout.setColumnStretch(0, 1)
+            inference_layout.addWidget(QLabel(label), index, 0)
+            inference_layout.addWidget(widget, index, 1)
+        inference_layout.setColumnStretch(1, 1)
         controls_layout.addWidget(inference_group)
 
         camera_group = QGroupBox("Camera properties")
@@ -396,10 +394,9 @@ class VisionPage(QWidget):
                 (self.auto_white_balance, self.white_balance),
             )
         ):
-            row = index * 2
-            camera_layout.addWidget(auto_control, row, 0)
-            camera_layout.addWidget(value_control, row + 1, 0, 1, 2)
-        camera_layout.setColumnStretch(0, 1)
+            camera_layout.addWidget(auto_control, index, 0)
+            camera_layout.addWidget(value_control, index, 1)
+        camera_layout.setColumnStretch(1, 1)
         controls_layout.addWidget(camera_group)
 
         action_row = QGridLayout()
@@ -467,7 +464,15 @@ class VisionPage(QWidget):
         image_layout.addWidget(self.roi_label)
         center.addWidget(image_card)
 
-        center.addWidget(controls)
+        controls_scroll = QScrollArea()
+        controls_scroll.setObjectName("visionControlsScroll")
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controls_scroll.setMinimumWidth(350)
+        controls_scroll.setMaximumWidth(450)
+        controls_scroll.setWidget(controls)
+        center.addWidget(controls_scroll)
         center.setStretchFactor(0, 5)
         center.setStretchFactor(1, 2)
         root.addWidget(center, 1)
@@ -476,6 +481,7 @@ class VisionPage(QWidget):
         self.setStyleSheet(
             """
             #visionPage { background: #f3f7fb; color: #172b4d; }
+            QScrollArea#visionControlsScroll, QScrollArea#visionControlsScroll > QWidget > QWidget { background: transparent; }
             QLabel#visionEyebrow { color: #078b80; font-size: 12px; font-weight: 800; }
             QLabel#visionTitle { color: #17304d; font-size: 28px; font-weight: 800; }
             QLabel#visionSubtitle { color: #61748c; font-size: 13px; }
@@ -716,15 +722,15 @@ class VisionPage(QWidget):
         self._camera_metadata = dict(metadata)
         requested = metadata.get("requested_camera", {})
         readback = metadata.get("readback_camera", {})
-        values = []
-        for name in ("exposure", "focus", "white_balance"):
-            entry = readback.get(name, {})
-            values.append(
-                f"{name}: {self._format_camera_value(requested.get(name))} -> "
-                f"{self._format_camera_value(entry.get('actual'))}"
+        backend = metadata.get("backend") or "unknown backend"
+        self.camera_readback.setText(self._describe_camera_readback(requested, readback))
+        if readback and not any(bool(entry.get("supported")) for entry in readback.values()):
+            self.status.setText(
+                f"Camera live. The {backend} backend does not expose exposure, focus or white balance "
+                "controls, so the auto switches and sliders have no effect on this camera."
             )
-        self.camera_readback.setText(" | ".join(values))
-        self.status.setText("Camera live. Preview is active; draw an ROI or load a local model.")
+        else:
+            self.status.setText("Camera live. Preview is active; draw an ROI or load a local model.")
         self._profile.backend = metadata.get("backend")
         self._profile.readback_camera = readback
         self._profile.frame_size = (
@@ -752,6 +758,34 @@ class VisionPage(QWidget):
     @Slot(str)
     def _worker_error(self, message: str) -> None:
         self.status.setText(message)
+
+    @classmethod
+    def _describe_camera_readback(cls, requested: dict[str, Any], readback: dict[str, Any]) -> str:
+        """Per property: 'auto', 'requested -> actual', and whether the driver accepted it."""
+
+        parts = []
+        for auto_name, name in (
+            ("auto_exposure", "exposure"),
+            ("autofocus", "focus"),
+            ("auto_white_balance", "white_balance"),
+        ):
+            entry = readback.get(name, {})
+            auto_entry = readback.get(auto_name, {})
+            if entry.get("mode") == "auto":
+                text = f"{name}: auto"
+                if not auto_entry.get("supported", False):
+                    text += " (not supported)"
+                elif entry.get("actual") is not None:
+                    text += f" (driver {cls._format_camera_value(entry.get('actual'))})"
+            else:
+                text = (
+                    f"{name}: {cls._format_camera_value(requested.get(name))} -> "
+                    f"{cls._format_camera_value(entry.get('actual'))}"
+                )
+                if entry and not entry.get("supported", False):
+                    text += " (not supported)"
+            parts.append(text)
+        return " | ".join(parts)
 
     @staticmethod
     def _format_camera_value(value: Any) -> str:

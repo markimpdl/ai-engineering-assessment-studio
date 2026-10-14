@@ -91,11 +91,24 @@ class CandidateWorkspaceTests(unittest.TestCase):
             self.assertEqual(reopened.session.session_id, created.session.session_id)
             self.assertEqual(reopened.session.candidate_id, "C014")
 
-    def test_new_workspace_defaults_to_c014_without_candidate_id(self) -> None:
+    def test_new_workspace_takes_candidate_id_from_folder_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = load_workspace(Path(temp_dir) / "new-workspace")
+            workspace = load_workspace(Path(temp_dir) / "candidate_workspaces" / "aluno1")
+
+            self.assertEqual(workspace.session.candidate_id, "aluno1")
+
+    def test_default_workspace_folder_still_yields_c014(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = load_workspace(Path(temp_dir) / "C014")
 
             self.assertEqual(workspace.session.candidate_id, "C014")
+
+    def test_folder_name_is_sanitised_for_the_training_server_identity(self) -> None:
+        from ai_assessment.app import candidate_id_from_workspace
+
+        self.assertEqual(candidate_id_from_workspace(Path("/tmp/João Silva")), "Jo-o-Silva")
+        self.assertEqual(candidate_id_from_workspace(Path("/tmp/aluno_02.b")), "aluno_02.b")
+        self.assertEqual(candidate_id_from_workspace(Path("/tmp/---")), "C014")
 
     def test_candidate_id_mismatch_exits_with_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

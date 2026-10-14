@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -10,6 +11,19 @@ from .modules.pages import PAGES, PageDefinition
 
 
 DEFAULT_CANDIDATE_ID = "C014"
+_CANDIDATE_ID_CHARS = re.compile(r"[^A-Za-z0-9_.\-]+")
+
+
+def candidate_id_from_workspace(path: Path) -> str:
+    """Derive a candidate ID from the workspace folder name (e.g. ``aluno1``).
+
+    Only characters accepted by the training server identity rule are kept, so the
+    same ID can be sent as ``X-Candidate-ID``. Falls back to the default ID when the
+    folder name has nothing usable.
+    """
+
+    name = _CANDIDATE_ID_CHARS.sub("-", path.resolve().name).strip("-.")
+    return name[:64] or DEFAULT_CANDIDATE_ID
 
 
 def default_workspace_root() -> Path:
@@ -35,7 +49,7 @@ def load_workspace(path: Path, candidate_id: str | None = None) -> CandidateWork
         return workspace
     return CandidateWorkspace.create(
         path,
-        candidate_id=candidate_id or DEFAULT_CANDIDATE_ID,
+        candidate_id=candidate_id or candidate_id_from_workspace(path),
         mode="training",
     )
 
@@ -53,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Candidate identifier for a newly created workspace. "
-            f"Defaults to {DEFAULT_CANDIDATE_ID}; when reopening, omit it or match session.json."
+            "Defaults to the workspace folder name; when reopening, omit it or match session.json."
         ),
     )
     parser.add_argument(
@@ -90,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             QListWidget,
             QListWidgetItem,
             QMainWindow,
+            QScrollArea,
             QStackedWidget,
             QVBoxLayout,
             QWidget,
@@ -144,10 +159,26 @@ def main(argv: list[str] | None = None) -> int:
             layout.addWidget(workspace_label)
             layout.addStretch(1)
 
+    def scrollable(page: QWidget) -> QScrollArea:
+        """Host a page in a scroll area so its minimum size never forces the window size.
+
+        Without this, the stacked widget's minimum size is the largest page's minimum
+        (over 1100 px tall), which exceeds 1080p screens and makes maximized windows
+        overflow and overlap their controls.
+        """
+
+        area = QScrollArea()
+        area.setObjectName("pageScroll")
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(page)
+        return area
+
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("AI Engineering Assessment Studio")
+            self.setMinimumSize(960, 600)
             self.resize(1160, 760)
 
             container = QWidget()
@@ -167,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"{workspace.session.candidate_id}  |  {workspace.session.mode.title()}"
             )
             candidate.setObjectName("candidate")
+            workspace_folder = QLabel(f"Workspace: {workspace.root.name}")
+            workspace_folder.setObjectName("workspaceFolder")
+            workspace_folder.setWordWrap(True)
+            workspace_folder.setToolTip(str(workspace.root))
+            workspace_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
             self.nav = QListWidget()
             self.nav.setObjectName("navigation")
@@ -175,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
 
             sidebar_layout.addWidget(product)
             sidebar_layout.addWidget(candidate)
+            sidebar_layout.addWidget(workspace_folder)
             sidebar_layout.addWidget(self.nav, 1)
 
             self.stack = QStackedWidget()
@@ -195,30 +232,30 @@ def main(argv: list[str] | None = None) -> int:
             for page in PAGES:
                 if page.title == "Calibration":
                     self.calibration_page = CalibrationPage(workspace)
-                    self.stack.addWidget(self.calibration_page)
+                    self.stack.addWidget(scrollable(self.calibration_page))
                 elif page.title == "Dataset":
                     self.dataset_page = DatasetPage(workspace)
-                    self.stack.addWidget(self.dataset_page)
+                    self.stack.addWidget(scrollable(self.dataset_page))
                 elif page.title == "Vision":
                     self.vision_page = VisionPage(workspace)
-                    self.stack.addWidget(self.vision_page)
+                    self.stack.addWidget(scrollable(self.vision_page))
                 elif page.title == "Robot":
                     self.robot_page = RobotPage(workspace)
-                    self.stack.addWidget(self.robot_page)
+                    self.stack.addWidget(scrollable(self.robot_page))
                 elif page.title == "Training":
                     self.training_page = TrainingPage(workspace)
-                    self.stack.addWidget(self.training_page)
+                    self.stack.addWidget(scrollable(self.training_page))
                 elif page.title == "Results":
                     self.results_page = ResultsPage(workspace)
-                    self.stack.addWidget(self.results_page)
+                    self.stack.addWidget(scrollable(self.results_page))
                 elif page.title == "IDE":
                     self.ide_page = IDEPage(workspace, context_buffer, coordinator)
-                    self.stack.addWidget(self.ide_page)
+                    self.stack.addWidget(scrollable(self.ide_page))
                 elif page.title == "AI Assistant":
                     self.ai_page = AIAssistantPage(workspace, context_buffer, coordinator)
-                    self.stack.addWidget(self.ai_page)
+                    self.stack.addWidget(scrollable(self.ai_page))
                 else:
-                    self.stack.addWidget(Page(page))
+                    self.stack.addWidget(scrollable(Page(page)))
             self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
             self.nav.setCurrentRow(0)
 
@@ -271,6 +308,13 @@ def main(argv: list[str] | None = None) -> int:
         }
         #candidate {
             color: #53635c;
+        }
+        #workspaceFolder {
+            color: #0c3525;
+            background: #e2ece7;
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 13px;
         }
         #navigation {
             background: transparent;
@@ -394,6 +438,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     window = MainWindow()
     app.aboutToQuit.connect(window.shutdown)
+    screen = app.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        window.resize(
+            max(window.minimumWidth(), min(1480, int(available.width() * 0.9))),
+            max(window.minimumHeight(), min(960, int(available.height() * 0.9))),
+        )
     window.show()
     return app.exec()
 

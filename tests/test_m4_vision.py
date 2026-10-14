@@ -196,6 +196,39 @@ class VisionServiceTests(unittest.TestCase):
         json.dumps(readback)
         self.assertIs(type(readback["exposure"]["supported"]), bool)
 
+    def test_unsupported_camera_properties_are_reported_as_unsupported(self) -> None:
+        # AVFoundation-style backend: set() returns False and get() returns 0.
+        readback = apply_camera_properties(FakeCapture(True), {"auto_exposure": 1.0, "exposure": -6.0})
+        self.assertFalse(readback["auto_exposure"]["supported"])
+        self.assertFalse(readback["exposure"]["supported"])
+        self.assertEqual(readback["exposure"]["mode"], "auto")
+
+    def test_auto_switch_is_written_first_and_manual_value_is_skipped_while_auto(self) -> None:
+        import cv2
+
+        capture = RecordingCapture([])
+        readback = apply_camera_properties(
+            capture,
+            {"exposure": -6.0, "auto_exposure": 1.0, "focus": 25.0, "autofocus": 0.0},
+        )
+        written = [prop for prop, _value in capture.set_values]
+        self.assertEqual(written, [cv2.CAP_PROP_AUTO_EXPOSURE, cv2.CAP_PROP_AUTOFOCUS, cv2.CAP_PROP_FOCUS])
+        self.assertNotIn(cv2.CAP_PROP_EXPOSURE, written)
+        self.assertEqual(readback["auto_exposure"]["mode"], "auto")
+        self.assertEqual(readback["exposure"]["mode"], "auto")
+        self.assertTrue(readback["exposure"]["supported"])
+        self.assertEqual(readback["focus"]["mode"], "manual")
+        self.assertEqual(readback["focus"]["actual"], 25.0)
+
+        # Switching auto off writes the manual value again, after the switch.
+        capture.set_values.clear()
+        apply_camera_properties(capture, {"auto_exposure": 0.0, "exposure": -6.0})
+        self.assertEqual(
+            [prop for prop, _value in capture.set_values],
+            [cv2.CAP_PROP_AUTO_EXPOSURE, cv2.CAP_PROP_EXPOSURE],
+        )
+        self.assertEqual(capture.properties[cv2.CAP_PROP_EXPOSURE], -6.0)
+
     def test_camera_property_changes_apply_while_worker_is_running(self) -> None:
         CameraOwnership.release("vision")
         capture = RecordingCapture(
@@ -392,6 +425,24 @@ class VisionServiceTests(unittest.TestCase):
                 self.assertEqual(page._current_model_expected_sha, sha256_file(checkpoint))
             finally:
                 page.shutdown()
+
+    def test_camera_readback_text_names_auto_and_unsupported_properties(self) -> None:
+        from ai_assessment.modules.vision import VisionPage
+
+        requested = {"exposure": -6.0, "focus": 25.0, "white_balance": 4500.0}
+        readback = {
+            "auto_exposure": {"supported": True, "mode": "auto"},
+            "exposure": {"actual": -4.0, "supported": True, "mode": "auto"},
+            "autofocus": {"supported": False, "mode": "auto"},
+            "focus": {"actual": None, "supported": False, "mode": "auto"},
+            "auto_white_balance": {"supported": False, "mode": "manual"},
+            "white_balance": {"actual": 0.0, "supported": False, "mode": "manual"},
+        }
+        text = VisionPage._describe_camera_readback(requested, readback)
+        self.assertEqual(
+            text,
+            "exposure: auto (driver -4) | focus: auto (not supported) | white_balance: 4500 -> 0 (not supported)",
+        )
 
     def test_camera_controls_default_to_manual_and_focus_slider_disables_auto(self) -> None:
         from PySide6.QtWidgets import QApplication
