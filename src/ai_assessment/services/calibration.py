@@ -135,7 +135,22 @@ def fit_affine(
     matrix = matrix / matrix[2, 2]
     if not np.isfinite(matrix).all() or np.linalg.matrix_rank(matrix) < 3:
         raise CalibrationError("The calculated affine mapping is singular.")
-    _assert_fit(matrix[:2, :], source, destination)
+    # Four correspondences overdetermine a six-parameter affine transform. A
+    # least-squares fit normally has a small residual from pixel selection,
+    # even when the points describe the same plane.
+    mapped = np.asarray(
+        [transform_point(matrix[:2, :], u, v) for u, v in source],
+        dtype=np.float64,
+    )
+    max_error = float(np.max(np.linalg.norm(mapped - destination, axis=1)))
+    robot_span = float(np.linalg.norm(np.ptp(destination, axis=0)))
+    allowed_error = max(1e-6, 0.01 * robot_span)
+    if max_error > allowed_error:
+        raise CalibrationError(
+            f"Affine point fit error is {max_error:.2f} robot units "
+            f"(limit {allowed_error:.2f}). Check the matching points or "
+            "use 3 x 3 Perspective."
+        )
     return matrix[:2, :]
 
 

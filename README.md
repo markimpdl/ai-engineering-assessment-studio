@@ -89,7 +89,9 @@ Open the **Calibration** page from the application sidebar. Start a camera or op
 - `2 x 3 Affine` for a plane where perspective is negligible.
 - `3 x 3 Perspective` for a plane viewed at an angle.
 
-After calculating the matrix, click the frozen image to see a rounded integer robot X/Y prediction. The 5x cursor magnifier shows a pixel-level view. The matrix display is rounded to two decimals, while the workspace file retains full precision.
+After calculating the matrix, click the frozen image to see a rounded integer robot X/Y prediction. The 5x cursor magnifier shows a pixel-level view. The matrix display is rounded to two decimals, while the workspace file retains full precision. Stopping and restarting the camera, resuming live video, or loading another image retains the points and matrix. Freeze again to test; a different image size or source shows a warning, and a robot command is blocked. **Erase points and matrix** explicitly clears the current values. A previously saved workspace calibration remains available to load.
+
+To test a robot move, enter its base URL (for example, `http://192.168.1.10:8080`) or its full `/command` URL and enable **Send move on test click**. This option starts off. A valid click then shows the rounded X/Y and posts `{"command":"move","x":X,"y":Y,"z":100,"duration_ms":2000}` to `/command`. Network requests run outside the interface thread. The app does not queue a second move while one is in progress and does not retry a timed-out command because it may already have reached the controller. The URL stays in the current session and is not written to the workspace.
 
 Use **Save to workspace** and **Load workspace calibration** to persist the active calibration at `candidate_workspaces\C014\calibration\calibration.json`. The service reads legacy schema versions 1 and 2. It records the point pairs, transform, image geometry, coordinate convention, camera metadata, optional ROI metadata, and an image snapshot. A saved calibration cannot be applied to an image with a different width or height.
 
@@ -242,3 +244,4 @@ The terminal is a real `cmd.exe` process on Windows (or `/bin/sh` on other platf
 3. Run a long-lived script that starts a child process, press Stop, and confirm the script and child exit without changing a training job.
 4. Start, stop, and restart the terminal; run a harmless command from the workspace.
 5. Start the M5 local simulator, copy its displayed URL, and run a candidate script using `requests` against `/health` or `/positions`. Confirm the simulator responds and no physical-robot enable action is created.
+

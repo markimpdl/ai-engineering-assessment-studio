@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from ai_assessment.services.calibration import (
     CalibrationError,
@@ -16,6 +20,7 @@ from ai_assessment.services.calibration import (
     fit_homography,
     transform_point,
 )
+from ai_assessment.core.workspace import CandidateWorkspace
 
 
 class CalibrationServiceTests(unittest.TestCase):
@@ -42,6 +47,22 @@ class CalibrationServiceTests(unittest.TestCase):
             rtol=0.0,
             atol=1e-10,
         )
+
+    def test_affine_accepts_small_point_selection_error(self) -> None:
+        camera = ((154, 250), (154, 105), (418, 251), (417, 105))
+        robot = ((6, -256), (66, -256), (6, -146), (66, -146))
+
+        matrix = fit_affine(camera, robot)
+        errors = [
+            np.linalg.norm(np.asarray(transform_point(matrix, *uv)) - xy)
+            for uv, xy in zip(camera, robot)
+        ]
+        self.assertGreater(max(errors), 0.1)
+        self.assertLess(max(errors), 0.2)
+
+        inconsistent_robot = (*robot[:3], (200, -146))
+        with self.assertRaisesRegex(CalibrationError, "Affine point fit error"):
+            fit_affine(camera, inconsistent_robot)
 
     def test_known_homography_mapping(self) -> None:
         expected = np.array(
@@ -171,6 +192,140 @@ class CalibrationServiceTests(unittest.TestCase):
             atol=1e-10,
         )
 
+    def test_calibration_page_preserves_fit_across_live_resume_and_frame_change(self) -> None:
+        from PySide6.QtGui import QColor, QImage
+        from PySide6.QtWidgets import QApplication
+
+        from ai_assessment.modules.calibration import CalibrationPage
+
+        app = QApplication.instance() or QApplication([])
+        del app
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = CandidateWorkspace.create(Path(directory) / "C014", candidate_id="C014")
+            page = CalibrationPage(workspace)
+            try:
+                image = QImage(100, 80, QImage.Format.Format_RGB32)
+                image.fill(QColor("white"))
+                page._source_mode = "camera"
+                page._frozen = True
+                page._camera_metadata = {"source_type": "camera", "camera_index": 0}
+                page._set_current_image(image)
+                for index, (u, v) in enumerate(((10, 10), (70, 10), (70, 60), (10, 60))):
+                    page._select_row(index)
+                    page._image_clicked(u, v)
+                    page._robot_fields[index][0].setText(str(u + 5))
+                    page._robot_fields[index][1].setText(str(v + 7))
+                page._calculate()
+                record = page._record
+                points = page._points[:]
+                self.assertIsNotNone(record)
+                page._toggle_freeze()
+                self.assertEqual(page._record, record)
+                self.assertEqual(page._points, points)
+                page._camera_metadata_ready({"source_type": "camera", "camera_index": 0})
+                page._camera_frame_ready(np.zeros((80, 100, 3), dtype=np.uint8))
+                self.assertEqual(page._record, record)
+                page._toggle_freeze()
+                page._image_clicked(30, 30)
+                self.assertIn("ROBOT X: 35", page.test_result.text())
+                self.assertEqual(page._points, points)
+                page._toggle_freeze()
+                page._camera_frame_ready(np.zeros((100, 120, 3), dtype=np.uint8))
+                self.assertEqual(page._record, record)
+                self.assertEqual(page._points, points)
+                self.assertFalse(page.geometry_warning.isHidden())
+                page._camera_metadata_ready({"source_type": "camera", "camera_index": 1})
+                page._save_calibration()
+                saved = CalibrationService.load(page._calibration_path())
+                self.assertEqual(saved.camera_metadata["camera_index"], 0)
+                self.assertEqual(saved.snapshot_png, record.snapshot_png)
+                page._clear_points()
+                self.assertIsNone(page._record)
+                self.assertEqual(page._points, [None] * 4)
+                self.assertEqual(page.matrix_text.toPlainText(), "")
+            finally:
+                page.shutdown()
+
+    def test_robot_coordinates_are_visible_editable_numeric_text(self) -> None:
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+
+        from ai_assessment.modules.calibration import CalibrationPage
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = CandidateWorkspace.create(Path(directory) / "C014", candidate_id="C014")
+            page = CalibrationPage(workspace)
+            try:
+                field = page._robot_fields[0][0]
+                self.assertEqual(field.text(), "0.0")
+                self.assertTrue(field.isEnabled())
+                self.assertFalse(field.isReadOnly())
+                field.selectAll()
+                QTest.keyClicks(field, "-195.5")
+                self.assertEqual(field.text(), "-195.5")
+                field.selectAll()
+                QTest.keyClicks(field, "38")
+                self.assertEqual(field.text(), "38")
+                page._clear_points()
+                self.assertEqual(field.text(), "0.0")
+            finally:
+                page.shutdown()
+
+    def test_robot_click_requires_selector_matching_source_and_geometry(self) -> None:
+        from PySide6.QtGui import QColor, QImage
+        from PySide6.QtWidgets import QApplication
+
+        from ai_assessment.modules.calibration import CalibrationPage, _robot_base_url
+
+        self.assertEqual(_robot_base_url("http://127.0.0.1:8080/command"), "http://127.0.0.1:8080")
+        with self.assertRaises(ValueError):
+            _robot_base_url("http://alice:secret@127.0.0.1:8080")
+        app = QApplication.instance() or QApplication([])
+        del app
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = CandidateWorkspace.create(Path(directory) / "C014", candidate_id="C014")
+            page = CalibrationPage(workspace)
+            try:
+                image = QImage(100, 80, QImage.Format.Format_RGB32)
+                image.fill(QColor("white"))
+                page._source_mode = "camera"
+                page._frozen = True
+                page._camera_metadata = {"source_type": "camera", "camera_index": 0}
+                page._set_current_image(image)
+                points = ((10, 10), (70, 10), (70, 60), (10, 60))
+                robot = tuple((u + 5, v + 7) for u, v in points)
+                page._record = CalibrationService.fit("affine", points, robot, (100, 80), camera_metadata=page._camera_metadata)
+                page._edit_mode = False
+                page._send_robot_command = Mock()
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_not_called()
+                page.send_robot_on_click.setChecked(True)
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_called_once_with(35, 37)
+                page._send_robot_command.reset_mock()
+                page._camera_metadata = {"source_type": "camera", "camera_index": 1}
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_not_called()
+                page._camera_metadata = {"source_type": "camera", "camera_index": 0}
+                page._set_current_image(QImage(120, 100, QImage.Format.Format_RGB32))
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_not_called()
+            finally:
+                page.shutdown()
+
+    def test_robot_worker_posts_calibrated_xy_and_fixed_z(self) -> None:
+        from ai_assessment.modules.calibration import CalibrationMoveWorker
+
+        worker = CalibrationMoveWorker("http://127.0.0.1:8080", 35, 37)
+        adapter = Mock()
+        adapter.move_xyz.return_value.status_code = 200
+        with patch("ai_assessment.modules.calibration.RequestsRobotAdapter", return_value=adapter) as create:
+            worker.run()
+        self.assertEqual(create.call_args.kwargs["capabilities"].cartesian_move, True)
+        adapter.move_xyz.assert_called_once_with(35, 37, 100, 2000)
+
 
 if __name__ == "__main__":
     unittest.main()
+

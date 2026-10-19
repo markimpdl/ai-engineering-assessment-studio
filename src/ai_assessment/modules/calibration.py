@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import binascii
-from dataclasses import replace
+from math import hypot
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QBuffer, QIODevice, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtCore import QPoint, QRectF, Qt, QBuffer, QIODevice, QObject, QThread, Signal, Slot, QLocale
+from PySide6.QtGui import QColor, QDoubleValidator, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QButtonGroup,
-    QDoubleSpinBox,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -37,6 +38,7 @@ from ..services.calibration import (
     TransformType,
 )
 from ..services.camera import CameraOwnership, CameraWorker, ImageLoadWorker
+from ..services.robot import RequestsRobotAdapter, RobotCapabilities, RobotError, RobotTimeoutError
 
 
 def _qimage_from_rgb(rgb: Any) -> QImage:
@@ -237,15 +239,78 @@ class CalibrationImageView(QWidget):
             painter.drawLine(int(center_x), int(center_y - 12), int(center_x), int(center_y + 12))
 
 
-def _numeric_box() -> QDoubleSpinBox:
-    box = QDoubleSpinBox()
-    box.setRange(-1_000_000_000, 1_000_000_000)
-    box.setDecimals(1)
-    box.setSingleStep(0.1)
-    box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+def _numeric_box() -> QLineEdit:
+    box = QLineEdit("0.0")
+    validator = QDoubleValidator(-1_000_000_000, 1_000_000_000, 6, box)
+    validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+    numeric_locale = QLocale.c()
+    numeric_locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
+    validator.setLocale(numeric_locale)
+    box.setValidator(validator)
     box.setAlignment(Qt.AlignmentFlag.AlignRight)
     box.setMinimumWidth(96)
+    box.setToolTip("Robot coordinate. Type a number, using a period for decimals.")
     return box
+
+
+def _robot_base_url(text: str) -> str:
+    """Accept a base address or a full /command URL without duplicating the endpoint."""
+    value = text.strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError
+        # Accessing port also catches malformed values such as :abc.
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("Enter an http:// or https:// robot URL without credentials or query parameters.") from error
+    if parsed.path.endswith("/command"):
+        value = value[: -len("/command")]
+    return value
+
+
+class CalibrationMoveWorker(QObject):
+    completed = Signal(int)
+    failed = Signal(str, bool)
+    finished = Signal()
+
+    def __init__(self, base_url: str, x: int, y: int) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.x = x
+        self.y = y
+
+    @Slot()
+    def run(self) -> None:
+        adapter: RequestsRobotAdapter | None = None
+        try:
+            adapter = RequestsRobotAdapter(
+                self.base_url,
+                capabilities=RobotCapabilities(cartesian_move=True),
+                timeout_s=3.0,
+            )
+            response = adapter.move_xyz(self.x, self.y, 100, 2000)
+            self.completed.emit(response.status_code)
+        except RobotTimeoutError:
+            self.failed.emit(
+                "Robot response timed out. The move may have started; check the robot before another click.",
+                True,
+            )
+        except RobotError as error:
+            self.failed.emit(f"Robot move failed: {error}", False)
+        finally:
+            try:
+                if adapter is not None:
+                    adapter.session.close()
+            finally:
+                self.finished.emit()
 
 
 class CalibrationPage(QWidget):
@@ -270,6 +335,9 @@ class CalibrationPage(QWidget):
         self._camera_worker: CameraWorker | None = None
         self._image_thread: QThread | None = None
         self._image_worker: ImageLoadWorker | None = None
+        self._robot_thread: QThread | None = None
+        self._robot_worker: CalibrationMoveWorker | None = None
+        self._pending_robot_target: dict[str, int] | None = None
 
         self._build_ui()
         self._select_row(0)
@@ -284,7 +352,7 @@ class CalibrationPage(QWidget):
         title = QLabel("Camera to robot calibration")
         title.setObjectName("calibrationTitle")
         subtitle = QLabel(
-            "Freeze a full-frame image, select four corresponding points, fit a transform, and test clicks without moving the robot."
+            "Freeze a full-frame image, select four corresponding points, fit a transform, and test clicks. Robot moves are optional."
         )
         subtitle.setObjectName("calibrationSubtitle")
         subtitle.setWordWrap(True)
@@ -314,13 +382,16 @@ class CalibrationPage(QWidget):
             QLabel#calibrationWarning { background: #fff0ed; color: #9f2d20; border-radius: 8px; padding: 10px; }
             QLabel#calibrationResult { background: #087f75; color: white; border-radius: 10px; padding: 14px; font-size: 25px; font-weight: 800; }
             QLabel#calibrationMatrixNote { color: #61748c; font-size: 12px; }
+            QCheckBox#calibrationRobotToggle { background: #fff6e5; color: #795214; border: 1px solid #e7cf9d; border-radius: 8px; padding: 9px; font-weight: 750; }
+            QCheckBox#calibrationRobotToggle:checked { background: #dff6ea; color: #14675f; border-color: #8ac7ad; }
+            QCheckBox#calibrationRobotToggle::indicator { width: 19px; height: 19px; }
             QPushButton { background: #ffffff; color: #17304d; border: 1px solid #8fa5b5; border-radius: 5px; padding: 7px 13px; min-height: 32px; font-weight: 600; }
             QPushButton:hover { background: #e8f3f2; border-color: #087f75; }
             QPushButton#calibrationPrimary { background: #087f75; border-color: #087f75; color: white; font-weight: 800; }
             QPushButton#pointButton:checked { background: #ddf6f1; border: 2px solid #0b9d91; color: #086c63; font-weight: 800; }
             QRadioButton { background: #ffffff; color: #17304d; border: 1px solid #8fa5b5; border-radius: 5px; padding: 7px 13px; min-height: 32px; }
             QRadioButton:checked { background: #ddf6f1; border: 2px solid #0b9d91; color: #086c63; }
-            QDoubleSpinBox, QSpinBox { background: #ffffff; color: #17304d; border: 1px solid #cbd9e6; border-radius: 7px; padding: 5px 8px; min-height: 27px; }
+            QSpinBox, QLineEdit { background: #ffffff; color: #17304d; border: 1px solid #cbd9e6; border-radius: 7px; padding: 5px 8px; min-height: 27px; }
             QPlainTextEdit#calibrationMatrix { background: #f2f6fb; color: #17304d; border: 1px solid #d4e2ed; border-radius: 8px; padding: 9px; }
             """
         )
@@ -394,6 +465,31 @@ class CalibrationPage(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        robot_heading = QLabel("Optional robot test move")
+        robot_heading.setObjectName("calibrationSection")
+        layout.addWidget(robot_heading)
+        self.send_robot_on_click = QCheckBox("Enable robot movement on test clicks (Z = 100)")
+        self.send_robot_on_click.setChecked(False)
+        self.send_robot_on_click.setObjectName("calibrationRobotToggle")
+        self.send_robot_on_click.setToolTip(
+            "After calculating a matrix, click the frozen image to send one move to the robot."
+        )
+        layout.addWidget(self.send_robot_on_click)
+        robot_url_row = QHBoxLayout()
+        robot_url_row.addWidget(QLabel("Robot URL"))
+        self.robot_url = QLineEdit()
+        self.robot_url.setPlaceholderText("http://192.168.1.10:8080")
+        self.robot_url.setToolTip("Base URL or full /command URL. The address stays in this session only.")
+        robot_url_row.addWidget(self.robot_url, 1)
+        layout.addLayout(robot_url_row)
+        robot_note = QLabel(
+            "Off by default. With a valid matrix, clicking a frozen image sends POST /command "
+            "with the displayed X/Y, Z = 100 and duration = 2000 ms."
+        )
+        robot_note.setObjectName("calibrationMatrixNote")
+        robot_note.setWordWrap(True)
+        layout.addWidget(robot_note)
+
         table = QGridLayout()
         table.setHorizontalSpacing(6)
         table.setVerticalSpacing(5)
@@ -403,7 +499,7 @@ class CalibrationPage(QWidget):
             table.addWidget(field, 0, column)
         self._point_buttons: list[QPushButton] = []
         self._pixel_labels: list[tuple[QLabel, QLabel]] = []
-        self._robot_fields: list[tuple[QDoubleSpinBox, QDoubleSpinBox]] = []
+        self._robot_fields: list[tuple[QLineEdit, QLineEdit]] = []
         for row in range(4):
             button = QPushButton(f"{row + 1:02d}")
             button.setObjectName("pointButton")
@@ -415,8 +511,8 @@ class CalibrationPage(QWidget):
             v_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._pixel_labels.append((u_label, v_label))
             x_box, y_box = _numeric_box(), _numeric_box()
-            x_box.valueChanged.connect(self._invalidate_fit)
-            y_box.valueChanged.connect(self._invalidate_fit)
+            x_box.textChanged.connect(self._invalidate_fit)
+            y_box.textChanged.connect(self._invalidate_fit)
             self._robot_fields.append((x_box, y_box))
             for column, widget in enumerate((button, u_label, v_label, x_box, y_box)):
                 table.addWidget(widget, row + 1, column)
@@ -444,9 +540,9 @@ class CalibrationPage(QWidget):
         calculate_button.setObjectName("calibrationPrimary")
         calculate_button.clicked.connect(self._calculate)
         controls.addWidget(calculate_button)
-        clear_button = QPushButton("Clear points")
-        clear_button.clicked.connect(self._clear_points)
-        controls.addWidget(clear_button)
+        self.clear_button = QPushButton("Erase points and matrix")
+        self.clear_button.clicked.connect(self._clear_points)
+        controls.addWidget(self.clear_button)
         layout.addLayout(controls)
 
         matrix_label = QLabel("CAMERA PIXEL -> ROBOT PLANE")
@@ -505,10 +601,11 @@ class CalibrationPage(QWidget):
             return
         self._source_mode = "camera"
         self._frozen = False
-        self._clear_points()
-        self._current_image = QImage()
-        self.view.set_image(self._current_image)
+        self.view.test_point = None
+        self.view.update()
+        self.test_result.setText("ROBOT X: --     Y: --")
         self.freeze_button.setEnabled(False)
+        self.freeze_button.setText("Freeze frame")
         self.start_button.setText("Stop camera")
         self._camera_thread = QThread(self)
         self._camera_worker = CameraWorker(self.camera_index.value())
@@ -539,7 +636,8 @@ class CalibrationPage(QWidget):
     @Slot(object)
     def _camera_metadata_ready(self, metadata: dict[str, Any]) -> None:
         self._camera_metadata = dict(metadata)
-        self._set_status("Camera live. Freeze the image before selecting points.")
+        self._update_geometry_warning()
+        self._set_status("Camera live. Freeze the image before selecting or testing points. Existing calibration is retained.")
 
     @Slot(str)
     def _camera_error(self, message: str) -> None:
@@ -565,9 +663,11 @@ class CalibrationPage(QWidget):
             self._set_status("Frame frozen; select four corresponding points.")
             self.freeze_button.setText("Resume live")
         else:
-            self._clear_points()
             self.freeze_button.setText("Freeze frame")
-            self._set_status("Camera live; freeze the frame before selecting points.")
+            self.view.test_point = None
+            self.view.update()
+            self.test_result.setText("ROBOT X: --     Y: --")
+            self._set_status("Camera live; points and matrix retained. Freeze a frame to test again.")
 
     def _open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -599,11 +699,10 @@ class CalibrationPage(QWidget):
         self._source_mode = "saved_image"
         self._frozen = True
         self._camera_metadata = dict(metadata)
-        self._clear_points()
         self._set_current_image(_qimage_from_rgb(rgb))
         self.freeze_button.setEnabled(False)
         self.freeze_button.setText("Frame frozen")
-        self._set_status("Saved image loaded; select four corresponding points.")
+        self._set_status("Saved image loaded; existing points and matrix retained. Check geometry before testing.")
 
     @Slot(str)
     def _image_error(self, message: str) -> None:
@@ -646,7 +745,15 @@ class CalibrationPage(QWidget):
             self.test_result.setText(
                 f"ROBOT X: {round(result[0])}     Y: {round(result[1])}"
             )
-            self._set_status("Test prediction shown. No robot command was sent.")
+            if self.send_robot_on_click.isChecked():
+                mismatch = self._robot_source_mismatch()
+                if mismatch is not None:
+                    self._show_geometry_warning(mismatch)
+                    self._set_status(f"Robot command blocked: {mismatch}")
+                else:
+                    self._send_robot_command(round(result[0]), round(result[1]))
+            else:
+                self._set_status("Test prediction shown. Robot sending is off.")
             return
 
         self._points[self._selected_row] = (float(round(u)), float(round(v)))
@@ -662,6 +769,75 @@ class CalibrationPage(QWidget):
             self._select_row(next_row)
         else:
             self._set_status("Four image points selected; enter robot X/Y and calculate.")
+
+    def _robot_source_mismatch(self) -> str | None:
+        if self._record is None:
+            return None
+        expected = self._record.camera_metadata or {}
+        actual = self._camera_metadata
+        if expected.get("source_type") and actual.get("source_type") != expected["source_type"]:
+            return "The current image source differs from the calibrated source."
+        if (
+            expected.get("source_type") == "camera"
+            and expected.get("camera_index") is not None
+            and actual.get("camera_index") != expected["camera_index"]
+        ):
+            return "The camera index differs from the calibrated camera."
+        if (
+            expected.get("source_type") == "saved_image"
+            and expected.get("path")
+            and actual.get("path") != expected["path"]
+        ):
+            return "The saved image differs from the calibrated image."
+        return None
+
+    def _send_robot_command(self, x: int, y: int) -> None:
+        if self._robot_thread is not None:
+            self._set_status("A robot command is still in progress; no new move was queued.")
+            return
+        try:
+            base_url = _robot_base_url(self.robot_url.text())
+        except ValueError as error:
+            self._set_status(str(error))
+            return
+        target = {"x": x, "y": y, "z": 100, "duration_ms": 2000}
+        self._pending_robot_target = target
+        self._robot_thread = QThread(self)
+        self._robot_worker = CalibrationMoveWorker(base_url, x, y)
+        self._robot_worker.moveToThread(self._robot_thread)
+        self._robot_thread.started.connect(self._robot_worker.run)
+        self._robot_worker.completed.connect(self._robot_move_completed)
+        self._robot_worker.failed.connect(self._robot_move_failed)
+        self._robot_worker.finished.connect(self._robot_thread.quit)
+        self._robot_worker.finished.connect(self._robot_worker.deleteLater)
+        self._robot_thread.finished.connect(self._robot_thread_finished)
+        self._robot_thread.finished.connect(self._robot_thread.deleteLater)
+        self.workspace.record_event("calibration.robot_test.started", target)
+        self._robot_thread.start()
+        self._set_status(f"Sending move to ({x}, {y}, 100); waiting for the robot response.")
+
+    @Slot(int)
+    def _robot_move_completed(self, status_code: int) -> None:
+        self.workspace.record_event(
+            "calibration.robot_test.completed",
+            {**(self._pending_robot_target or {}), "status_code": status_code},
+        )
+        self._set_status(f"Robot accepted the move (HTTP {status_code}).")
+
+    @Slot(str, bool)
+    def _robot_move_failed(self, message: str, uncertain: bool) -> None:
+        self.workspace.record_event(
+            "calibration.robot_test.uncertain" if uncertain else "calibration.robot_test.failed",
+            self._pending_robot_target or {},
+            outcome="uncertain" if uncertain else "error",
+        )
+        self._set_status(message)
+
+    @Slot()
+    def _robot_thread_finished(self) -> None:
+        self._robot_thread = None
+        self._robot_worker = None
+        self._pending_robot_target = None
 
     def _invalidate_fit(self, *_args: Any) -> None:
         self._record = None
@@ -683,11 +859,16 @@ class CalibrationPage(QWidget):
             v_label.setText("--")
             for field in self._robot_fields[row]:
                 field.blockSignals(True)
-                field.setValue(0.0)
+                field.setText("0.0")
                 field.blockSignals(False)
         self.matrix_text.clear()
         self.test_result.setText("ROBOT X: --     Y: --")
         self.save_button.setEnabled(False)
+        self.geometry_warning.setVisible(False)
+        self._selected_row = 0
+        for index, button in enumerate(self._point_buttons):
+            button.setChecked(index == 0)
+        self._set_status("Current points and matrix erased. A previously saved workspace calibration remains available.")
 
     def _calculate(self) -> None:
         if self._current_image.isNull() or not self._frozen:
@@ -696,9 +877,10 @@ class CalibrationPage(QWidget):
         if any(point is None for point in self._points):
             self._set_status("Select all four image points first.")
             return
-        robot_points = [
-            (x.value(), y.value()) for x, y in self._robot_fields
-        ]
+        if any(not field.hasAcceptableInput() for pair in self._robot_fields for field in pair):
+            self._set_status("Enter a valid number for every robot X/Y coordinate.")
+            return
+        robot_points = [(float(x.text()), float(y.text())) for x, y in self._robot_fields]
         transform: TransformType = (
             "homography" if self.homography_choice.isChecked() else "affine"
         )
@@ -710,6 +892,7 @@ class CalibrationPage(QWidget):
                 (self._current_image.width(), self._current_image.height()),
                 camera_metadata=self._camera_metadata,
                 roi=self._roi_metadata,
+                snapshot_png=self._snapshot_png(),
             )
         except CalibrationError as error:
             self._set_status(str(error))
@@ -720,7 +903,18 @@ class CalibrationPage(QWidget):
             button.setChecked(False)
         self.save_button.setEnabled(True)
         self._update_geometry_warning()
-        self._set_status("Matrix ready. Click the image to test a robot X/Y prediction.")
+        point_errors = []
+        for (u, v), (x, y) in zip(
+            self._record.camera_points_uv, self._record.robot_points_xy
+        ):
+            fitted_x, fitted_y = CalibrationService.apply(
+                self._record, (u, v), self._record.image_size
+            )
+            point_errors.append(hypot(fitted_x - x, fitted_y - y))
+        self._set_status(
+            f"Matrix ready. Maximum point fit error: {max(point_errors):.2f} "
+            "robot units. Click the image to test a robot X/Y prediction."
+        )
 
     def _snapshot_png(self) -> bytes | None:
         if self._current_image.isNull():
@@ -739,21 +933,14 @@ class CalibrationPage(QWidget):
             self._set_status("Calculate a matrix before saving.")
             return
         try:
-            record = replace(
-                self._record,
-                snapshot_png=self._snapshot_png(),
-                camera_metadata=dict(self._camera_metadata),
-                roi=dict(self._roi_metadata) if self._roi_metadata is not None else None,
-            )
             path = self._calibration_path()
-            CalibrationService.save(path, record)
-            self._record = record
+            CalibrationService.save(path, self._record)
             self.workspace.record_event(
                 "calibration.saved",
                 {
                     "path": str(path.relative_to(self.workspace.root)),
-                    "transform": record.transform,
-                    "image_size": list(record.image_size),
+                    "transform": self._record.transform,
+                    "image_size": list(self._record.image_size),
                 },
             )
             self._set_status(f"Saved active calibration to {path}.")
@@ -771,6 +958,7 @@ class CalibrationPage(QWidget):
             self._set_status(f"Could not load calibration: {error}")
             return
 
+        restored_snapshot = False
         if self._current_image.isNull() and record.snapshot_png is not None:
             snapshot = QImage.fromData(record.snapshot_png, "PNG")
             if not snapshot.isNull():
@@ -779,6 +967,7 @@ class CalibrationPage(QWidget):
                 self._set_current_image(snapshot)
                 self.freeze_button.setEnabled(False)
                 self.freeze_button.setText("Frame frozen")
+                restored_snapshot = True
         self.homography_choice.blockSignals(True)
         self.affine_choice.blockSignals(True)
         self.homography_choice.setChecked(record.transform == "homography")
@@ -795,10 +984,11 @@ class CalibrationPage(QWidget):
             self._pixel_labels[row][1].setText(str(round(v)))
             for field, value in zip(self._robot_fields[row], (x, y)):
                 field.blockSignals(True)
-                field.setValue(float(value))
+                field.setText(f"{value:.6f}".rstrip("0").rstrip(".") or "0")
                 field.blockSignals(False)
         self.matrix_text.setPlainText(_format_matrix(record.matrix))
-        self._camera_metadata = dict(record.camera_metadata or {})
+        if restored_snapshot:
+            self._camera_metadata = dict(record.camera_metadata or {})
         self._roi_metadata = dict(record.roi) if record.roi is not None else None
         self._edit_mode = False
         self.save_button.setEnabled(True)
@@ -825,8 +1015,12 @@ class CalibrationPage(QWidget):
         except CalibrationGeometryMismatchError as error:
             self._show_geometry_warning(str(error))
         else:
-            self.geometry_warning.clear()
-            self.geometry_warning.setVisible(False)
+            mismatch = self._robot_source_mismatch()
+            if mismatch is not None:
+                self._show_geometry_warning(mismatch)
+            else:
+                self.geometry_warning.clear()
+                self.geometry_warning.setVisible(False)
 
     def _show_geometry_warning(self, message: str) -> None:
         self.geometry_warning.setText(message)
@@ -840,3 +1034,7 @@ class CalibrationPage(QWidget):
         if self._image_thread is not None:
             self._image_thread.quit()
             self._image_thread.wait(1500)
+        if self._robot_thread is not None:
+            self._robot_thread.quit()
+            self._robot_thread.wait(6000)
+

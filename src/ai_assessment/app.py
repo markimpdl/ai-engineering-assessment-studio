@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         from .modules.robot import RobotPage
         from .modules.results import ResultsPage
         from .modules.training import TrainingPage
+        from .modules.remote_training import RemoteTrainingPanel
         from .modules.vision import VisionPage
         from .services.ai_context import AIContextBuffer
         from .services.ai_ide_transfer import AIIdeCoordinator
@@ -247,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
             self.vision_page = None
             self.robot_page = None
             self.training_page = None
+            self.remote_training_page = None
             self.results_page = None
             self.ide_page = None
             self.ai_page = None
@@ -272,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
                 elif page.title == "Training":
                     self.training_page = TrainingPage(workspace)
                     self.add_page(self.training_page)
+                elif page.title == "Remote Training":
+                    self.remote_training_page = RemoteTrainingPanel(workspace)
+                    self.add_page(self.remote_training_page)
                 elif page.title == "Results":
                     self.results_page = ResultsPage(workspace)
                     self.add_page(self.results_page)

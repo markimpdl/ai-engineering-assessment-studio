@@ -27,6 +27,11 @@ PAGES = [
         "M6",
     ),
     PageDefinition(
+        "Remote Training",
+        "Submit datasets and YOLO training to the GPU cluster.",
+        "M6",
+    ),
+    PageDefinition(
         "Vision",
         "Inspect camera input, ROI processing, detections, and centers.",
         "M4",

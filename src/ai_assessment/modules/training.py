@@ -149,7 +149,6 @@ class TrainingPage(QWidget):
         form.addRow("Device", self.device)
         form.addRow("Mixed precision", self.amp)
         root.addWidget(config)
-
         actions = QHBoxLayout()
         self.start_button = QPushButton("Start training")
         self.start_button.setObjectName("trainingPrimary")
