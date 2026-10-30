@@ -40,38 +40,38 @@ bash install_macos.sh
 
 The script asks for an environment name (default `ai-assessment-studio`), creates or reuses a Python 3.12 Conda environment, installs the macOS PyTorch wheels and `.[gui]`, then checks that the application imports and that a CPU or MPS tensor can be created. If Conda is not found, initialize it with `conda init zsh` (or `conda init bash` for Bash), reopen Terminal, and rerun the script. Existing environments must use Python 3.12.
 
-After setup, open a new Terminal in the repository:
+After setup, open a new Terminal in the repository. Replace `C015` with the candidate ID assigned to this computer:
 
 ```bash
 conda activate ai-assessment-studio
-python -m ai_assessment --headless-check --workspace candidate_workspaces/C014
-python -m ai_assessment --workspace candidate_workspaces/C014
+python -m ai_assessment --headless-check --candidate-id C015
+python -m ai_assessment --candidate-id C015
 ```
 
 On Apple Silicon, select `mps` in Training when the installer reports `device: mps`; otherwise select `cpu`. Intel Macs install the last available compatible PyTorch 2.2.2 / torchvision 0.17.2 wheels and train on CPU. macOS does not use the Windows CUDA PyTorch wheels. This is a developer/practice install; the official assessment workstation remains the Windows 11 baseline. A real Mac test of the camera, training, and simulator is still needed.
 
 ## Run the shell and tests
 
-Create or reopen the default `C014` workspace and launch the desktop shell. A new workspace takes its candidate ID from the folder name, so each student can use their own folder, for example `--workspace candidate_workspaces\aluno1`; the sidebar shows both the ID and the workspace folder. Pass `--candidate-id` only to override that name:
+Assign each computer its own candidate ID before launching. The Conda environment name and the Windows computer name do not set the candidate ID. A new workspace takes its candidate ID from the folder name, so each student can also use their own folder, for example `--workspace candidate_workspaces\aluno1`; the sidebar shows both the ID and the workspace folder. Replace `C015` in these examples with the ID assigned to this computer:
 
 ```bat
-python -m ai_assessment --workspace candidate_workspaces\C014
+python -m ai_assessment --candidate-id C015
 ```
 
-The sidebar shows the candidate ID saved in the active workspace's `session.json`. For a new candidate workspace, use its ID as the folder name; the app will assign that ID automatically:
+The sidebar shows the candidate ID saved in the active workspace's `session.json`. You can also specify a new candidate-style workspace folder directly:
 
 ```bat
 python -m ai_assessment --workspace candidate_workspaces\C015
 ```
 
-Alternatively, `python -m ai_assessment --candidate-id C015` creates or opens `candidate_workspaces/C015` when no workspace path is provided. From inside an existing candidate workspace, the app reopens that workspace. From the repository root, it automatically opens a single existing candidate workspace; when several exist, provide `--workspace` so the app does not guess. Without any existing workspace or candidate ID, the practice default remains `C014`.
+The `--candidate-id` option creates or opens the matching `candidate_workspaces/C015` folder when run from the repository root. It takes precedence over an inherited `AI_ASSESSMENT_WORKSPACE` setting. An explicit `--workspace` path takes precedence over both. From inside an existing candidate workspace, the app reopens that workspace. From the repository root, specify an ID or workspace on every launch; the app does not guess from existing workspaces or create `C014` silently. Check an inherited setting on Windows with `Get-ChildItem Env:AI_ASSESSMENT_WORKSPACE` in PowerShell.
 
-When reopening, the saved session ID must match a candidate-style folder name and any explicit `--candidate-id`. If an older run created `candidate_workspaces/C015/session.json` with `C014`, startup reports the mismatch instead of displaying the wrong identity. Preserve that workspace and its audit events; create a correctly identified workspace for new work rather than editing `session.json` by hand.
+When reopening, the saved session ID must match a candidate-style folder name and any explicit `--candidate-id`. If an older run created `candidate_workspaces/C015/session.json` with `C014`, startup reports the mismatch instead of displaying the wrong identity. Preserve that workspace and its audit events; create a correctly identified workspace for new work rather than editing `session.json` by hand. The `C014` paths in module examples below are sample paths for that candidate only.
 
 Run the non-GUI workspace check:
 
 ```bat
-python -m ai_assessment --headless-check --workspace candidate_workspaces\C014
+python -m ai_assessment --headless-check --candidate-id C015
 ```
 
 Run the full M1-M8 tests:
@@ -84,12 +84,12 @@ Events are stored in `candidate_workspaces\C014\logs\events.jsonl`; server recei
 
 ## M2 calibration
 
-Open the **Calibration** page from the application sidebar. Start a camera or open a saved image, freeze the full-frame image, select four image points, enter their matching robot X/Y coordinates, and choose exactly one transform:
+Open the **Calibration** page from the application sidebar. Choose **Webcam** or **RTSP stream** as the live source, or open a saved image. For RTSP, enter an editable `rtsp://` or `rtsps://` URL (for example, `rtsp://10.16.224.100:8554/camera`) and click **Start stream**. Freeze the full-frame image, select four image points, enter their matching robot X/Y coordinates, and choose exactly one transform:
 
 - `2 x 3 Affine` for a plane where perspective is negligible.
 - `3 x 3 Perspective` for a plane viewed at an angle.
 
-After calculating the matrix, click the frozen image to see a rounded integer robot X/Y prediction. The 5x cursor magnifier shows a pixel-level view. The matrix display is rounded to two decimals, while the workspace file retains full precision. Stopping and restarting the camera, resuming live video, or loading another image retains the points and matrix. Freeze again to test; a different image size or source shows a warning, and a robot command is blocked. **Erase points and matrix** explicitly clears the current values. A previously saved workspace calibration remains available to load.
+After calculating the matrix, click the frozen image to see a rounded integer robot X/Y prediction. The 5x cursor magnifier shows a pixel-level view. The matrix display is rounded to two decimals, while the workspace file retains full precision. Stopping and restarting the webcam or RTSP stream, resuming live video, or loading another image retains the points and matrix. Freeze again to test; a different image size or source shows a warning, and a robot command is blocked. RTSP disconnects retry until you click **Stop stream**. The RTSP URL stays in the current session; saved calibration metadata contains a fingerprint to recognize the same stream without saving its URL or credentials. **Erase points and matrix** explicitly clears the current values. A previously saved workspace calibration remains available to load.
 
 To test a robot move, enter its base URL (for example, `http://192.168.1.10:8080`) or its full `/command` URL and enable **Send move on test click**. This option starts off. A valid click then shows the rounded X/Y and posts `{"command":"move","x":X,"y":Y,"z":100,"duration_ms":2000}` to `/command`. Network requests run outside the interface thread. The app does not queue a second move while one is in progress and does not retry a timed-out command because it may already have reached the controller. The URL stays in the current session and is not written to the workspace.
 

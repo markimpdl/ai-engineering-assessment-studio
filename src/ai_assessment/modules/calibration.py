@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QDoubleValidator, QFont, QImage, QPainter, QPe
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -37,7 +38,7 @@ from ..services.calibration import (
     CalibrationService,
     TransformType,
 )
-from ..services.camera import CameraOwnership, CameraWorker, ImageLoadWorker
+from ..services.camera import CameraOwnership, CameraWorker, ImageLoadWorker, validate_rtsp_url
 from ..services.robot import RequestsRobotAdapter, RobotCapabilities, RobotError, RobotTimeoutError
 
 
@@ -314,7 +315,7 @@ class CalibrationMoveWorker(QObject):
 
 
 class CalibrationPage(QWidget):
-    """Four-point calibration page with non-blocking camera/image workers."""
+    """Four-point calibration page with non-blocking camera, RTSP and image workers."""
 
     status_changed = Signal(str)
 
@@ -324,6 +325,7 @@ class CalibrationPage(QWidget):
         self.setObjectName("calibrationPage")
         self._current_image = QImage()
         self._source_mode: str | None = None
+        self._selected_source_type = "camera"
         self._frozen = False
         self._points: list[tuple[float, float] | None] = [None] * 4
         self._selected_row = 0
@@ -391,7 +393,8 @@ class CalibrationPage(QWidget):
             QPushButton#pointButton:checked { background: #ddf6f1; border: 2px solid #0b9d91; color: #086c63; font-weight: 800; }
             QRadioButton { background: #ffffff; color: #17304d; border: 1px solid #8fa5b5; border-radius: 5px; padding: 7px 13px; min-height: 32px; }
             QRadioButton:checked { background: #ddf6f1; border: 2px solid #0b9d91; color: #086c63; }
-            QSpinBox, QLineEdit { background: #ffffff; color: #17304d; border: 1px solid #cbd9e6; border-radius: 7px; padding: 5px 8px; min-height: 27px; }
+            QComboBox, QSpinBox, QLineEdit { background: #ffffff; color: #17304d; border: 1px solid #cbd9e6; border-radius: 7px; padding: 5px 8px; min-height: 27px; }
+            QComboBox QAbstractItemView { background: #ffffff; color: #17304d; selection-background-color: #ddf6f1; selection-color: #086c63; }
             QPlainTextEdit#calibrationMatrix { background: #f2f6fb; color: #17304d; border: 1px solid #d4e2ed; border-radius: 8px; padding: 9px; }
             """
         )
@@ -403,12 +406,19 @@ class CalibrationPage(QWidget):
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(9)
 
-        heading = QLabel("01  Camera workspace")
+        heading = QLabel("01  Image source")
         heading.setObjectName("calibrationSection")
         layout.addWidget(heading)
 
         camera_row = QHBoxLayout()
-        camera_row.addWidget(QLabel("Camera index"))
+        camera_row.addWidget(QLabel("Source"))
+        self.source_choice = QComboBox()
+        self.source_choice.addItem("Webcam", "camera")
+        self.source_choice.addItem("RTSP stream", "rtsp")
+        self.source_choice.currentIndexChanged.connect(self._source_choice_changed)
+        camera_row.addWidget(self.source_choice)
+        self.camera_index_label = QLabel("Camera index")
+        camera_row.addWidget(self.camera_index_label)
         self.camera_index = QSpinBox()
         self.camera_index.setRange(0, 9)
         self.camera_index.setValue(0)
@@ -419,6 +429,17 @@ class CalibrationPage(QWidget):
         camera_row.addWidget(self.start_button)
         camera_row.addStretch(1)
         layout.addLayout(camera_row)
+
+        self.rtsp_row = QWidget()
+        rtsp_row_layout = QHBoxLayout(self.rtsp_row)
+        rtsp_row_layout.setContentsMargins(0, 0, 0, 0)
+        rtsp_row_layout.addWidget(QLabel("RTSP URL"))
+        self.rtsp_url = QLineEdit()
+        self.rtsp_url.setPlaceholderText("rtsp://10.16.224.100:8554/camera")
+        self.rtsp_url.setToolTip("Enter a stream URL. It stays in this session only.")
+        rtsp_row_layout.addWidget(self.rtsp_url, 1)
+        layout.addWidget(self.rtsp_row)
+        self.rtsp_row.setVisible(False)
 
         actions = QHBoxLayout()
         self.freeze_button = QPushButton("Freeze frame")
@@ -441,7 +462,7 @@ class CalibrationPage(QWidget):
         layout.addWidget(self.test_result)
 
         self.status = QLabel(
-            "Choose a camera or saved image. Freeze the frame before selecting points."
+            "Choose a webcam, RTSP stream or saved image. Freeze before selecting points."
         )
         self.status.setObjectName("calibrationStatus")
         self.status.setWordWrap(True)
@@ -591,24 +612,58 @@ class CalibrationPage(QWidget):
         self.status.setText(message)
         self.status_changed.emit(message)
 
+    def _source_choice_changed(self, _index: int) -> None:
+        if self._camera_thread is not None:
+            return
+        source_type = str(self.source_choice.currentData())
+        if source_type != self._selected_source_type:
+            self._selected_source_type = source_type
+            self._frozen = False
+            self._camera_metadata = {}
+            self._set_current_image(QImage())
+            self.freeze_button.setEnabled(False)
+            self.freeze_button.setText("Freeze frame")
+            self.test_result.setText("ROBOT X: --     Y: --")
+            self._set_status("Source changed. Start the new source; points and matrix are retained.")
+        rtsp = source_type == "rtsp"
+        self.camera_index_label.setVisible(not rtsp)
+        self.camera_index.setVisible(not rtsp)
+        self.rtsp_row.setVisible(rtsp)
+        self.start_button.setText("Start stream" if rtsp else "Start camera")
+
     def _toggle_camera(self) -> None:
         if self._camera_thread is not None:
             self._stop_camera()
             return
-        if not CameraOwnership.acquire("calibration"):
+        source_type = str(self.source_choice.currentData())
+        rtsp_url = None
+        if source_type == "rtsp":
+            try:
+                rtsp_url = validate_rtsp_url(self.rtsp_url.text())
+            except ValueError as error:
+                self._set_status(str(error))
+                return
+        elif not CameraOwnership.acquire("calibration"):
             owner = CameraOwnership.current_owner() or "another module"
             self._set_status(f"Camera is already in use by {owner}. Stop it before starting calibration.")
             return
-        self._source_mode = "camera"
+        self._source_mode = source_type
         self._frozen = False
+        self._camera_metadata = {}
+        self._set_current_image(QImage())
         self.view.test_point = None
         self.view.update()
         self.test_result.setText("ROBOT X: --     Y: --")
         self.freeze_button.setEnabled(False)
         self.freeze_button.setText("Freeze frame")
-        self.start_button.setText("Stop camera")
+        self.start_button.setText("Stop stream" if source_type == "rtsp" else "Stop camera")
+        self.source_choice.setEnabled(False)
+        self.camera_index.setEnabled(False)
+        self.rtsp_url.setEnabled(False)
         self._camera_thread = QThread(self)
-        self._camera_worker = CameraWorker(self.camera_index.value())
+        self._camera_worker = CameraWorker(
+            self.camera_index.value(), source_type=source_type, rtsp_url=rtsp_url
+        )
         self._camera_worker.moveToThread(self._camera_thread)
         self._camera_thread.started.connect(self._camera_worker.run)
         self._camera_worker.frame_ready.connect(self._camera_frame_ready)
@@ -619,43 +674,60 @@ class CalibrationPage(QWidget):
         self._camera_thread.finished.connect(self._camera_thread_finished)
         self._camera_thread.finished.connect(self._camera_thread.deleteLater)
         self._camera_thread.start()
-        self._set_status("Opening camera in a worker thread...")
+        self._set_status(
+            "Opening RTSP stream in a worker thread..."
+            if source_type == "rtsp" else "Opening camera in a worker thread..."
+        )
 
     def _stop_camera(self) -> None:
         if self._camera_worker is not None:
             self._camera_worker.stop()
-            self._set_status("Stopping camera...")
+            self.start_button.setEnabled(False)
+            self._set_status("Stopping image source...")
 
     @Slot(object)
     def _camera_frame_ready(self, rgb: Any) -> None:
-        if self._source_mode != "camera" or self._frozen:
+        if self._source_mode not in ("camera", "rtsp") or self._frozen:
             return
         self._set_current_image(_qimage_from_rgb(rgb))
         self.freeze_button.setEnabled(True)
 
     @Slot(object)
     def _camera_metadata_ready(self, metadata: dict[str, Any]) -> None:
+        if metadata.get("source_type") != self._source_mode:
+            return
         self._camera_metadata = dict(metadata)
         self._update_geometry_warning()
-        self._set_status("Camera live. Freeze the image before selecting or testing points. Existing calibration is retained.")
+        self._set_status(
+            "RTSP live. Freeze the image before selecting or testing points. Existing calibration is retained."
+            if self._source_mode == "rtsp"
+            else "Camera live. Freeze the image before selecting or testing points. Existing calibration is retained."
+        )
 
     @Slot(str)
     def _camera_error(self, message: str) -> None:
-        self._set_status(message)
+        if self._source_mode in ("camera", "rtsp"):
+            if self._source_mode == "rtsp" and not self._frozen:
+                self.freeze_button.setEnabled(False)
+            self._set_status(message)
 
     @Slot()
     def _camera_thread_finished(self) -> None:
         CameraOwnership.release("calibration")
         self._camera_thread = None
         self._camera_worker = None
-        self.start_button.setText("Start camera")
+        self.source_choice.setEnabled(True)
+        self.camera_index.setEnabled(True)
+        self.rtsp_url.setEnabled(True)
+        self.start_button.setEnabled(True)
+        self._source_choice_changed(self.source_choice.currentIndex())
         self.freeze_button.setEnabled(not self._current_image.isNull())
 
     def _toggle_freeze(self) -> None:
         if self._current_image.isNull():
             self._set_status("Waiting for a camera frame or saved image.")
             return
-        if self._source_mode != "camera":
+        if self._source_mode not in ("camera", "rtsp"):
             self._frozen = True
             return
         self._frozen = not self._frozen
@@ -667,7 +739,7 @@ class CalibrationPage(QWidget):
             self.view.test_point = None
             self.view.update()
             self.test_result.setText("ROBOT X: --     Y: --")
-            self._set_status("Camera live; points and matrix retained. Freeze a frame to test again.")
+            self._set_status("Source live; points and matrix retained. Freeze a frame to test again.")
 
     def _open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -789,6 +861,11 @@ class CalibrationPage(QWidget):
             and actual.get("path") != expected["path"]
         ):
             return "The saved image differs from the calibrated image."
+        if (
+            expected.get("source_type") == "rtsp"
+            and expected.get("source_id") != actual.get("source_id")
+        ):
+            return "The RTSP stream differs from the calibrated stream."
         return None
 
     def _send_robot_command(self, x: int, y: int) -> None:
@@ -1030,7 +1107,7 @@ class CalibrationPage(QWidget):
         self._stop_camera()
         if self._camera_thread is not None:
             self._camera_thread.quit()
-            self._camera_thread.wait(1500)
+            self._camera_thread.wait(7000)
         if self._image_thread is not None:
             self._image_thread.quit()
             self._image_thread.wait(1500)

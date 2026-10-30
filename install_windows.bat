@@ -139,15 +139,20 @@ echo Setup complete
 echo ================================================
 echo.
 echo This script cannot activate the parent CMD or PowerShell session.
+echo The Conda environment name does not identify a candidate.
+echo Choose the unique candidate ID assigned to this computer before launching.
+echo Replace ^<assigned-ID^> below, for example with C015. Do not reuse a workspace from another computer.
 echo In a new Command Prompt or Anaconda Prompt, run:
+echo   cd /d "%REPO_ROOT%"
 echo   call conda activate %ENV_NAME%
-echo   python -m ai_assessment.app --headless-check --workspace candidate_workspaces\C014
-echo   python -m ai_assessment.app --workspace candidate_workspaces\C014
+echo   python -m ai_assessment.app --headless-check --candidate-id ^<assigned-ID^>
+echo   python -m ai_assessment.app --candidate-id ^<assigned-ID^>
 echo.
 echo In PowerShell, run:
+echo   Set-Location -LiteralPath "%REPO_ROOT%"
 echo   conda activate %ENV_NAME%
-echo   python -m ai_assessment.app --headless-check --workspace candidate_workspaces\C014
-echo   python -m ai_assessment.app --workspace candidate_workspaces\C014
+echo   python -m ai_assessment.app --headless-check --candidate-id ^<assigned-ID^>
+echo   python -m ai_assessment.app --candidate-id ^<assigned-ID^>
 echo.
 echo To host the LAN training server from this environment, run from the repository root:
 echo   python -m server.run_training_server

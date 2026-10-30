@@ -30,6 +30,25 @@ class RemoteClusterClient:
                 headers={"x-api-key": self.key}, timeout=kwargs.pop("timeout", (5, 60)), **kwargs)
             resp.raise_for_status()
             return resp
+        except requests.HTTPError as exc:
+            response = exc.response
+            detail = None
+            if response is not None:
+                try:
+                    payload = response.json()
+                    detail = payload.get("detail") if isinstance(payload, dict) else None
+                except ValueError:
+                    pass
+            if isinstance(detail, list):
+                detail = "; ".join(
+                    str(item.get("msg", item)) if isinstance(item, dict) else str(item)
+                    for item in detail
+                )
+            if detail:
+                raise RemoteClusterError(
+                    f"Cluster HTTP {response.status_code} for {method} {path}: {detail}"
+                ) from exc
+            raise RemoteClusterError(str(exc)) from exc
         except requests.RequestException as exc:
             raise RemoteClusterError(str(exc)) from exc
 
@@ -71,6 +90,14 @@ class RemoteClusterClient:
             raise RemoteClusterError("Unexpected /jobs response")
         return [job for job in rows if isinstance(job, dict)
                 and job.get("student_id") == self.candidate_id]
+
+    def log(self, job_id: str, offset: int = 0):
+        self._check_owned(job_id)
+        return self.request(
+            "GET", f"/jobs/{job_id}/log",
+            params={"offset": offset, "limit": 32768},
+            timeout=(5, 15),
+        ).json()
 
     def cancel(self, job_id: str):
         self._check_owned(job_id)

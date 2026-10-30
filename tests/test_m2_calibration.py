@@ -272,6 +272,92 @@ class CalibrationServiceTests(unittest.TestCase):
             finally:
                 page.shutdown()
 
+    def test_rtsp_worker_reconnects_without_saving_or_reporting_credentials(self) -> None:
+        from ai_assessment.services.camera import CameraWorker, _open_rtsp_capture, validate_rtsp_url
+        import cv2
+
+        url = "rtsp://viewer:private@127.0.0.1:8554/camera"
+        self.assertEqual(validate_rtsp_url(url), url)
+        for invalid in ("", "http://127.0.0.1/stream", "rtsp://", "rtsp://host:bad/camera"):
+            with self.assertRaises(ValueError):
+                validate_rtsp_url(invalid)
+        with patch("ai_assessment.services.camera.cv2.VideoCapture") as open_cv:
+            _open_rtsp_capture(url)
+        open_cv.assert_called_once_with(
+            url,
+            cv2.CAP_FFMPEG,
+            [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000],
+        )
+
+        failed = Mock()
+        failed.isOpened.return_value = False
+        live = Mock()
+        live.isOpened.return_value = True
+        live.getBackendName.return_value = "FFMPEG"
+        live.get.return_value = 30.0
+        live.read.return_value = (True, np.zeros((80, 100, 3), dtype=np.uint8))
+        worker = CameraWorker(0, source_type="rtsp", rtsp_url=url)
+        errors = []
+        metadata = []
+        frames = []
+        worker.error.connect(errors.append)
+        worker.metadata_ready.connect(metadata.append)
+        worker.frame_ready.connect(lambda frame: (frames.append(frame), worker.stop()))
+        with patch("ai_assessment.services.camera._open_rtsp_capture", side_effect=[failed, live]) as open_capture:
+            with patch.object(worker.stop_requested, "wait", return_value=False):
+                worker.run()
+
+        self.assertEqual(open_capture.call_count, 2)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(metadata[0]["source_type"], "rtsp")
+        self.assertEqual(len(metadata[0]["source_id"]), 64)
+        self.assertNotIn("private", str(metadata))
+        self.assertNotIn("private", str(errors))
+        failed.release.assert_called_once()
+        live.release.assert_called_once()
+
+    def test_rtsp_calibration_freezes_and_blocks_another_stream(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from ai_assessment.modules.calibration import CalibrationPage
+
+        app = QApplication.instance() or QApplication([])
+        del app
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = CandidateWorkspace.create(Path(directory) / "C014", candidate_id="C014")
+            page = CalibrationPage(workspace)
+            try:
+                page.source_choice.setCurrentIndex(1)
+                self.assertFalse(page.rtsp_row.isHidden())
+                page._source_mode = "rtsp"
+                page._camera_metadata_ready({"source_type": "rtsp", "source_id": "first"})
+                page._camera_frame_ready(np.zeros((80, 100, 3), dtype=np.uint8))
+                self.assertTrue(page.freeze_button.isEnabled())
+                page._toggle_freeze()
+                self.assertTrue(page._frozen)
+                points = ((10, 10), (70, 10), (70, 60), (10, 60))
+                robot = tuple((u + 5, v + 7) for u, v in points)
+                page._record = CalibrationService.fit(
+                    "affine", points, robot, (100, 80), camera_metadata=page._camera_metadata
+                )
+                page._edit_mode = False
+                page.send_robot_on_click.setChecked(True)
+                page._send_robot_command = Mock()
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_called_once_with(35, 37)
+                page._send_robot_command.reset_mock()
+                page._camera_metadata_ready({"source_type": "rtsp", "source_id": "second"})
+                page._image_clicked(30, 30)
+                page._send_robot_command.assert_not_called()
+                self.assertIn("RTSP stream differs", page.status.text())
+                record = page._record
+                page.source_choice.setCurrentIndex(0)
+                self.assertEqual(page._record, record)
+                self.assertTrue(page._current_image.isNull())
+                self.assertFalse(page.freeze_button.isEnabled())
+            finally:
+                page.shutdown()
+
     def test_robot_click_requires_selector_matching_source_and_geometry(self) -> None:
         from PySide6.QtGui import QColor, QImage
         from PySide6.QtWidgets import QApplication
